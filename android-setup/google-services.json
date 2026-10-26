@@ -14,11 +14,11 @@
       },
       "oauth_client": [
         {
-          "client_id": "589252246114-kihucp39ijdj1jjk50i2cjhsdjk5ui86.apps.googleusercontent.com",
+          "client_id": "589252246114-p6617di1vhidd6eg44hpogk76diphlf0.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
             "package_name": "app.wyticleai.vercel",
-            "certificate_hash": "156d9482f1eaf49751eb566477388b8e3f3f58ac"
+            "certificate_hash": "1add8ae4ac21f9ae21cef0fc6cf673b05aafc9be"
           }
         },
         {
