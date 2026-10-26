@@ -66,11 +66,12 @@ async function deactivatePushDevice(uid,token){
   if(firestore){const ref=pushCollection().doc(pushDocId(token));const doc=await ref.get();if(doc.exists&&doc.get('userId')===String(uid))await ref.set({active:false,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});return;}
   if(supabaseError)throw supabaseError;throw new Error('No push-device registry is configured.');
 }
-const OPENAI_API_KEY=process.env.OPENAI_API_KEY;
-const OPENAI_MODEL=process.env.OPENAI_MODEL||'gpt-4.1-mini';
-const GEMINI_API_KEY=process.env.GEMINI_API_KEY||'';
+const GEMINI_API_KEY=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||'').trim();
+const splitList=v=>String(v||'').split(',').map(x=>x.trim()).filter(Boolean);
 const GEMINI_MODEL=process.env.GEMINI_MODEL||'gemini-3.5-flash-lite';
-const GEMINI_FALLBACK_MODELS=(process.env.GEMINI_FALLBACK_MODELS||'gemini-3.8-flash,gemini-3.6-flash').split(',').map(x=>x.trim()).filter(Boolean);
+const GEMINI_FALLBACK_MODELS=splitList(process.env.GEMINI_FALLBACK_MODELS||'gemini-3.8-flash,gemini-3.6-flash');
+const GEMINI_IMAGE_MODEL=process.env.GEMINI_IMAGE_MODEL||'gemini-3.1-flash-image-preview';
+const GEMINI_IMAGE_FALLBACK_MODELS=splitList(process.env.GEMINI_IMAGE_FALLBACK_MODELS||'gemini-2.5-flash-image');
 const APP_URL=(process.env.APP_URL||'http://localhost:5173').replace(/\/$/,'');
 const API_PUBLIC_URL=(process.env.API_PUBLIC_URL||'http://localhost:8787').replace(/\/$/,'');
 
@@ -93,7 +94,14 @@ async function auth(req,res,next){
     if(!token) return res.status(401).json({error:'Sign in to continue.'});
     if(!firebaseReady) return res.status(503).json({error:'Server authentication is not configured. Set FIREBASE_SERVICE_ACCOUNT_JSON.'});
     const decoded=await admin.auth().verifyIdToken(token,true); req.user={uid:decoded.uid,email:decoded.email||'',name:decoded.name||'',picture:decoded.picture||''}; next();
-  }catch(e){return res.status(401).json({error:'Your session has expired. Sign in again.'});}
+  }catch(e){
+    // Only a bad/expired/revoked token is the user's problem (401). A Firebase Admin or network failure must not log everyone out.
+    const code=String(e?.code||'');
+    const tokenProblem=/^auth\/(id-token-expired|id-token-revoked|argument-error|invalid-id-token|user-disabled|user-not-found|invalid-user-token|user-token-expired)$/.test(code)||/decode|malformed|incorrect "?(aud|iss)|Firebase ID token has/i.test(String(e?.message||''));
+    if(tokenProblem)return res.status(401).json({error:'Your session has expired. Sign in again.',code:'session_expired'});
+    console.error('Auth verification unavailable:',code||e?.message);
+    return res.status(503).json({error:'Sign-in verification is temporarily unavailable. Please try again in a moment.',code:'auth_unavailable'});
+  }
 }
 function safeEqual(a,b){const x=Buffer.from(String(a)),y=Buffer.from(String(b));return x.length===y.length&&crypto.timingSafeEqual(x,y);} // compares BYTE lengths; timingSafeEqual throws on unequal buffers
 function dbRequired(req,res,next){if(!supabase)return res.status(503).json({error:'Account database is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'});next();}
@@ -112,7 +120,7 @@ async function ensureWallet(uid){
   if(!data){const r=await supabase.from('wryte_wallets').insert({user_id:uid,credits:0,free_generations_used:0,trial_project_ids:[]}).select('*').single(); if(r.error && r.error.code!=='23505')throw r.error; if(r.data)data=r.data; else {const again=await supabase.from('wryte_wallets').select('*').eq('user_id',uid).single(); if(again.error)throw again.error;data=again.data;}}
   return data;
 }
-app.get('/health',(_req,res)=>res.json({ok:true,service:'wyticle-ai-api',authConfigured:firebaseReady,databaseConfigured:Boolean(supabase),aiConfigured:Boolean(OPENAI_API_KEY||GEMINI_API_KEY),aiProvider:OPENAI_API_KEY?'openai':GEMINI_API_KEY?'gemini':'unconfigured'}));
+app.get('/health',(_req,res)=>res.json({ok:true,service:'wyticle-ai-api',authConfigured:firebaseReady,databaseConfigured:Boolean(supabase),aiConfigured:Boolean(GEMINI_API_KEY),aiProvider:GEMINI_API_KEY?'gemini':'unconfigured'}));
 app.post('/api/push/register',auth,async(req,res)=>{
   const token=String(req.body?.token||'').trim();const platform=String(req.body?.platform||'unknown');
   if(token.length<40||token.length>4096||!/^[A-Za-z0-9_./:-]+$/.test(token))return res.status(400).json({error:'Invalid push registration token.'});
@@ -347,95 +355,229 @@ app.post('/api/internal/scheduled-worker',async(req,res)=>{const secret=String(p
 
 // AI costs are estimated from observed tokens and current rate configuration. Credits are internal units;
 // a wallet RPC atomically spends credits or consumes one of the two initial-article entitlements.
-// ---- Cost-based pricing: credits are derived from real OpenAI costs, so changing model/prices never silently loses money ----
-// Hard-coded pricing and usage protections. Update these constants in source when pricing changes.
+// ---- Cost-based pricing: credits are derived from real Gemini costs, so changing model/prices never silently loses money ----
+// Defaults match gemini-3.5-flash-lite list prices; override with the GEMINI_* USD env vars when you change model or Google changes prices.
 const envNum=(k,d)=>{const v=Number(process.env[k]);return Number.isFinite(v)&&v>0?v:d;};
 const PRICING_CONFIG = Object.freeze({
-  inputUsdPerMillion: 0.40,
-  outputUsdPerMillion: 1.60,
-  imageUsdCost: 0.063,
-  creditMarkup: 5,
-  creditValueUsd: 0.002,
-  maxSearchCalls: 3,
-  trialFollowupLimit: 4,
-  maxInputTokensEstimate: 35000
+  inputUsdPerMillion: envNum('GEMINI_INPUT_USD_PER_M',0.30),
+  outputUsdPerMillion: envNum('GEMINI_OUTPUT_USD_PER_M',2.50), // thinking tokens are billed as output
+  searchUsdPerCall: envNum('SEARCH_USD_PER_CALL',0.035),      // one grounded (Google Search) research request
+  imageUsdCost: envNum('IMAGE_USD_COST',0.07),
+  creditMarkup: envNum('CREDIT_MARKUP',5),
+  creditValueUsd: envNum('CREDIT_VALUE_USD',0.002),
+  maxSearchCalls: 1,
+  trialFollowupLimit: envNum('TRIAL_FOLLOWUP_LIMIT',4),
+  maxInputTokensEstimate: envNum('MAX_INPUT_TOKENS_ESTIMATE',35000)
 });
-function pricing(){const inPerM=PRICING_CONFIG.inputUsdPerMillion;return {inPerM,outPerM:PRICING_CONFIG.outputUsdPerMillion,
-  search:0.01+8000*inPerM/1e6, // estimated web search cost per call
-  image:PRICING_CONFIG.imageUsdCost,
-  markup:PRICING_CONFIG.creditMarkup,
-  creditUsd:PRICING_CONFIG.creditValueUsd};
-}
+function pricing(){return {inPerM:PRICING_CONFIG.inputUsdPerMillion,outPerM:PRICING_CONFIG.outputUsdPerMillion,search:PRICING_CONFIG.searchUsdPerCall,image:PRICING_CONFIG.imageUsdCost,markup:PRICING_CONFIG.creditMarkup,creditUsd:PRICING_CONFIG.creditValueUsd};}
 const costUsd=({input=0,output=0,searches=0})=>{const p=pricing();return input/1e6*p.inPerM+output/1e6*p.outPerM+searches*p.search;};
 const creditsForUsd=(usd)=>{const p=pricing();return Math.max(1,Math.ceil(usd*p.markup/p.creditUsd));};
 const imageCredits=()=>Number(process.env.IMAGE_CREDIT_COST)||creditsForUsd(pricing().image);
-const MAX_SEARCH_CALLS=()=>PRICING_CONFIG.maxSearchCalls;
-const maxOutTokens=(action)=>action==='diagnose'?1500:Math.min(12000,envNum('MAX_OUTPUT_TOKENS',9000));
-const searchLimit=(action)=>action==='diagnose'||process.env.ENABLE_WEB_SEARCH==='false'?0:(action==='initial'?MAX_SEARCH_CALLS():Math.min(2,MAX_SEARCH_CALLS()));
-// Gemini resilience: prefer the configured stable model, retry transient failures with jitter,
-// then fail over to other current stable models. A single user generation is still reserved
-// and settled once, regardless of how many upstream attempts are needed.
+// Gemini counts "thinking" tokens against maxOutputTokens, so leave headroom or JSON can be cut off mid-way.
+const OUTPUT_HEADROOM=3000;
+const maxOutTokens=(action)=>action==='diagnose'?1500+OUTPUT_HEADROOM:Math.min(16000,envNum('MAX_OUTPUT_TOKENS',9000)+OUTPUT_HEADROOM);
+// Live research (Google Search grounding) is a single extra request. It is skipped for diagnosis, fixes and plain-writing documents.
+const RESEARCH_DOC_TYPES=new Set(['report','businessPlan','proposal','pressRelease','productDescription']);
+const searchLimit=(action,docType='article')=>{
+  if(process.env.ENABLE_WEB_SEARCH==='false'||['diagnose','fix'].includes(action))return 0;
+  if(docType&&docType!=='article'&&!RESEARCH_DOC_TYPES.has(docType))return 0;
+  return PRICING_CONFIG.maxSearchCalls;
+};
+
+// ---- Gemini (Google AI Studio): the only AI provider, for text, live research and images ----
+// A single user request is reserved and settled once, no matter how many upstream attempts or fallback models are needed.
 const sleep=(ms)=>new Promise(resolve=>setTimeout(resolve,ms));
-function geminiErrorIsPermanentQuota(status, message='') {
-  return status===402 || (status===429 && /quota.?exceeded|daily limit|per day|billing|prepay|insufficient.*credit/i.test(message));
+class AIError extends Error{constructor(message,{status=502,code='ai_error',retryable=false,log=''}={}){super(message);this.name='AIError';this.status=status;this.code=code;this.retryable=retryable;this.log=log;}}
+// User-facing text never contains provider names, quota/billing wording or keys. (HTTP 402 is reserved for the user's own credit wallet.)
+const AI_MSG={
+  busy:'The AI service is busy right now. Please try again in a few minutes. You were not charged.',
+  setup:'The AI service is temporarily unavailable. Please try again later. You were not charged.',
+  timeout:'The AI took too long to respond. Please try again. You were not charged.',
+  blocked:'The AI could not complete this request because its safety filters flagged it. Try rewording the topic or instructions. You were not charged.',
+  truncated:'The response was too long and was cut off. Choose a shorter length or fewer sections and try again. You were not charged.',
+  badOutput:'The AI returned an incomplete result. Please try again. You were not charged.',
+  badRequest:'The AI could not process this request. Try shortening your instructions and try again. You were not charged.'
+};
+function classifyGeminiError(status,message=''){
+  const m=String(message),log=`Gemini HTTP ${status}: ${m}`.slice(0,600);
+  if(/api key (not valid|expired)|api_key_invalid|permission.?denied|has been suspended|consumer.*suspended/i.test(m)||[401,403].includes(status))return new AIError(AI_MSG.setup,{status:503,code:'ai_auth',log});
+  if(status===404||/models?\/\S+ (is )?not found|not found for api version|not supported for generatecontent/i.test(m))return new AIError(AI_MSG.setup,{status:503,code:'ai_model',log});
+  if(status===429||/quota|resource.?exhausted|rate.?limit|billing|prepay|depleted/i.test(m)){const hard=/per day|daily|billing|prepay|depleted/i.test(m);return new AIError(AI_MSG.busy,{status:503,code:'ai_busy',retryable:!hard,log});}
+  if([408,500,502,503,504].includes(status))return new AIError(AI_MSG.busy,{status:503,code:'ai_busy',retryable:true,log});
+  if(status===400)return new AIError(AI_MSG.badRequest,{status:422,code:'ai_bad_request',log});
+  return new AIError(AI_MSG.busy,{status:503,code:'ai_busy',retryable:true,log});
 }
-async function generateWithGemini({system,userTask,action}) {
-  const configured=[GEMINI_MODEL,...GEMINI_FALLBACK_MODELS];
-  const models=[...new Set(configured)];
-  let lastError;
-  for (const model of models) {
-    // Two retries for transient overload/rate-limit/server errors, with exponential backoff + jitter.
-    for (let attempt=0; attempt<3; attempt++) {
-      let response, payload;
-      try {
-        response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,{
-          method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({systemInstruction:{parts:[{text:system}]},contents:[{role:'user',parts:[{text:userTask}]}],generationConfig:{responseMimeType:'application/json',maxOutputTokens:Math.min(12000,maxOutTokens(action))}}),
-          signal:AbortSignal.timeout(120000)
-        });
-        payload=await response.json().catch(()=>({}));
-      } catch (error) {
-        lastError=error;
-        if(attempt<2){await sleep(Math.min(8000,1000*(2**attempt)+Math.random()*400));continue;}
-        break; // network/timeout failure: try next model
-      }
-      if(response.ok) {
-        const outputText=(payload.candidates||[]).flatMap(c=>c.content?.parts||[]).map(part=>part.text||'').join('\n');
-        if(!outputText){lastError=new Error(`Gemini model ${model} returned no content.`);break;}
-        return {data:payload,outputText,usage:{inputTokens:payload.usageMetadata?.promptTokenCount||0,outputTokens:payload.usageMetadata?.candidatesTokenCount||0,searchCalls:0,model,provider:'gemini'}};
-      }
-      const message=payload.error?.message||`Gemini request failed (${response.status})`;
-      const error=new Error(message); error.status=response.status; lastError=error;
-      // A missing/unsupported model should move straight to the next candidate.
-      if(response.status===404 || /model.*not found|not supported for generatecontent/i.test(message)) break;
-      // Invalid key/permissions and depleted daily quota cannot be fixed by switching models.
-      if([400,401,403].includes(response.status)||geminiErrorIsPermanentQuota(response.status,message)) throw error;
-      if([408,429,500,502,503,504].includes(response.status)) {
-        if(attempt<2){await sleep(Math.min(8000,1000*(2**attempt)+Math.random()*500));continue;}
+const textModels=()=>[...new Set([GEMINI_MODEL,...GEMINI_FALLBACK_MODELS])];
+const imageModels=()=>[...new Set([GEMINI_IMAGE_MODEL,...GEMINI_IMAGE_FALLBACK_MODELS])];
+async function geminiRequest(model,body,timeoutMs=120000){
+  let response,payload;
+  try{
+    response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':GEMINI_API_KEY},body:JSON.stringify(body),signal:AbortSignal.timeout(timeoutMs)});
+    payload=await response.json().catch(()=>({}));
+  }catch(e){throw new AIError(AI_MSG.timeout,{status:504,code:'ai_timeout',retryable:true,log:`Gemini network error: ${e.name}: ${e.message}`});}
+  if(!response.ok)throw classifyGeminiError(response.status,payload.error?.message||'');
+  return payload;
+}
+// Tries each model in order; transient failures are retried with backoff + jitter, then the next model is used.
+async function runGemini({models,buildBody,validate,timeoutMs=120000,attempts=3}){
+  let last;
+  for(const model of models){
+    let useSchema=true;
+    for(let attempt=0;attempt<attempts;attempt++){
+      try{
+        const payload=await geminiRequest(model,buildBody(model,useSchema),timeoutMs);
+        return {model,...(await validate(payload,model))};
+      }catch(e){
+        if(!(e instanceof AIError))throw e;
+        last=e;console.warn(`[gemini] ${model} attempt ${attempt+1}/${attempts}: ${e.log||e.message}`);
+        if(e.code==='ai_auth'||e.code==='ai_blocked'||e.code==='ai_truncated')throw e;
+        if(e.code==='ai_model')break;                                   // unknown/unsupported model: next candidate
+        if(e.code==='ai_bad_request'){if(useSchema){useSchema=false;attempt--;continue;}throw e;} // retry once without responseSchema
+        if(e.retryable&&attempt<attempts-1){await sleep(Math.min(8000,1000*2**attempt+Math.random()*500));continue;}
         break;
       }
-      throw error;
     }
   }
-  throw new Error(`Gemini models are currently unavailable. Tried ${models.join(', ')}. Please retry shortly. Last error: ${lastError?.message||'unknown upstream error'}`);
+  throw last||new AIError(AI_MSG.busy,{status:503,code:'ai_busy'});
+}
+// Gemini's responseSchema is an OpenAPI subset: upper-case types, no additionalProperties.
+function toGeminiSchema(s){if(Array.isArray(s))return s.map(toGeminiSchema);if(!s||typeof s!=='object')return s;const o={};for(const [k,v] of Object.entries(s)){if(k==='additionalProperties')continue;if(k==='type'&&typeof v==='string'){o.type=v.toUpperCase();continue;}o[k]=(k==='properties'&&v&&typeof v==='object')?Object.fromEntries(Object.entries(v).map(([pk,pv])=>[pk,toGeminiSchema(pv)])):toGeminiSchema(v);}return o;}
+function extractJson(text){
+  const t=String(text||'').trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');
+  try{return JSON.parse(t);}catch{}
+  const a=t.indexOf('{'),b=t.lastIndexOf('}');
+  if(a>=0&&b>a){const s=t.slice(a,b+1);try{return JSON.parse(s);}catch{}try{return JSON.parse(s.replace(/,\s*([}\]])/g,'$1'));}catch{}}
+  return null;
+}
+const BLOCK_REASONS=new Set(['SAFETY','PROHIBITED_CONTENT','BLOCKLIST','SPII','IMAGE_SAFETY','IMAGE_PROHIBITED_CONTENT','RECITATION']);
+function readCandidate(payload,{allowTruncated=false}={}){
+  if(payload.promptFeedback?.blockReason)throw new AIError(AI_MSG.blocked,{status:422,code:'ai_blocked',log:`Prompt blocked: ${payload.promptFeedback.blockReason}`});
+  const c=payload.candidates?.[0];
+  if(!c)throw new AIError(AI_MSG.badOutput,{status:502,code:'ai_invalid',retryable:true,log:'Gemini returned no candidates'});
+  const finish=c.finishReason||'';
+  if(BLOCK_REASONS.has(finish)&&finish!=='RECITATION')throw new AIError(AI_MSG.blocked,{status:422,code:'ai_blocked',log:`Candidate blocked: ${finish}`});
+  if(finish==='MAX_TOKENS'&&!allowTruncated)throw new AIError(AI_MSG.truncated,{status:422,code:'ai_truncated',log:'Gemini output hit MAX_TOKENS'});
+  const text=(c.content?.parts||[]).filter(p=>!p.thought&&typeof p.text==='string').map(p=>p.text).join('');
+  return {candidate:c,text,finish};
+}
+function usageOf(payload,model,extra={}){const u=payload.usageMetadata||{};return {inputTokens:(u.promptTokenCount||0)+(u.toolUsePromptTokenCount||0),outputTokens:(u.candidatesTokenCount||0)+(u.thoughtsTokenCount||0),searchCalls:0,model,provider:'gemini',...extra};}
+const invalidOutput=(why)=>new AIError(AI_MSG.badOutput,{status:502,code:'ai_invalid',retryable:true,log:`Rejected output: ${why}`});
+const thinkingConfig=()=>process.env.GEMINI_THINKING_LEVEL?{thinkingConfig:{thinkingLevel:process.env.GEMINI_THINKING_LEVEL}}:{};
+async function generateStructured({system,userTask,schema,action,temperature=0.7,check}){
+  return runGemini({models:textModels(),attempts:3,
+    buildBody:(_model,useSchema)=>({systemInstruction:{parts:[{text:system}]},contents:[{role:'user',parts:[{text:userTask}]}],generationConfig:{responseMimeType:'application/json',...(useSchema?{responseSchema:toGeminiSchema(schema)}:{}),maxOutputTokens:maxOutTokens(action),temperature,...thinkingConfig()}}),
+    validate:async(payload,model)=>{const {text}=readCandidate(payload);const parsed=extractJson(text);if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw invalidOutput('not valid JSON');if(check)check(parsed);return {parsed,usage:usageOf(payload,model)};}
+  });
+}
+async function resolveRedirect(uri){
+  if(!/^https:\/\/vertexaisearch\.cloud\.google\.com\/grounding-api-redirect\//i.test(uri))return uri;
+  try{const r=await fetch(uri,{redirect:'manual',signal:AbortSignal.timeout(4000)});const loc=r.headers.get('location');if(loc&&/^https?:\/\//i.test(loc))return loc;}catch{}
+  return uri;
+}
+const hostOf=(u)=>{try{return new URL(u).hostname.replace(/^www\./,'');}catch{return '';}};
+// Sources come only from what Google Search actually returned, never from model memory, so there are no invented citations.
+async function groundingSources(candidate){
+  const gm=candidate.groundingMetadata||{},chunks=gm.groundingChunks||[],supports=gm.groundingSupports||[];
+  const resolved=await Promise.all(chunks.slice(0,12).map(c=>c?.web?.uri?resolveRedirect(c.web.uri):''));
+  const out=[],seen=new Set();
+  resolved.forEach((url,i)=>{
+    if(!/^https?:\/\//i.test(url||'')||seen.has(url)||out.length>=8)return;seen.add(url);
+    const w=chunks[i].web,host=hostOf(url),viaRedirect=/vertexaisearch\.cloud\.google\.com/i.test(url);
+    const seg=supports.find(s=>(s.groundingChunkIndices||[]).includes(i))?.segment?.text||'';
+    out.push({title:String(w.title||host||'Source').slice(0,200),url,publisher:String(viaRedirect?(w.title||''):host).slice(0,120),supports:seg.slice(0,240)});
+  });
+  return out;
+}
+// One grounded request gathers current facts; the writing request then uses those notes. Failure is non-fatal: the article is written without live facts.
+async function researchTopic({topic,niche,country,instruction}){
+  const prompt=`Research this topic with Google Search and report what a careful writer needs to know.\nTopic: ${topic}\nNiche: ${niche||'general'}\nCountry/market: ${country||'not specified'}\nExtra focus: ${instruction||'none'}\n\nReturn concise research notes (at most about 800 words) as bullet points: key facts with exact figures, dates, prices or rules and where they apply; current best practice; what readers commonly ask; notable disagreements or caveats. Prefer official, academic and major-publisher sources. State the year when a fact is time-sensitive. Do NOT write the article and do not invent anything the search results do not support.`;
+  try{
+    return await runGemini({models:textModels(),attempts:2,timeoutMs:70000,
+      buildBody:()=>({systemInstruction:{parts:[{text:'You are a meticulous research assistant. Ground every claim in Google Search results and be explicit about uncertainty.'}]},contents:[{role:'user',parts:[{text:prompt}]}],tools:[{google_search:{}}],generationConfig:{maxOutputTokens:4000,temperature:0.2}}),
+      validate:async(payload,model)=>{const {candidate,text}=readCandidate(payload,{allowTruncated:true});if(text.trim().length<200)throw invalidOutput('research notes too short');return {notes:text.trim().slice(0,9000),sources:await groundingSources(candidate),usage:usageOf(payload,model,{searchCalls:1})};}
+    });
+  }catch(e){console.warn('[research] skipped:',e.log||e.message);return null;}
+}
+// Image generation uses Gemini's native image models. Aspect ratio is optional: if a model rejects it, retry without.
+async function generateImageWithGemini(prompt){
+  let last;
+  for(const model of imageModels()){
+    for(const withRatio of [true,false]){
+      try{
+        const payload=await geminiRequest(model,{contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:{responseModalities:['IMAGE'],...(withRatio?{imageConfig:{aspectRatio:'16:9'}}:{})}},120000);
+        const {candidate}=readCandidate(payload,{allowTruncated:true});
+        const part=(candidate.content?.parts||[]).find(p=>(p.inlineData||p.inline_data)?.data);
+        if(!part)throw new AIError('The image service did not return a picture. Please try again. You were not charged.',{status:502,code:'ai_invalid',retryable:true,log:`No image part (${candidate.finishReason||'n/a'})`});
+        const d=part.inlineData||part.inline_data;
+        return {b64:d.data,mime:d.mimeType||d.mime_type||'image/png',model};
+      }catch(e){
+        if(!(e instanceof AIError))throw e;
+        last=e;console.warn(`[gemini-image] ${model}${withRatio?'':' (no ratio)'}: ${e.log||e.message}`);
+        if(['ai_auth','ai_blocked'].includes(e.code))throw e;
+        if(e.code==='ai_bad_request'&&withRatio)continue;
+        break;
+      }
+    }
+  }
+  throw last||new AIError(AI_MSG.busy,{status:503,code:'ai_busy'});
 }
 
 // The hold is the worst case the request can cost (token caps + search cap), so a generation can never cost more than was reserved.
 function estimateCredits({action,brief={}}){if(action==='image')return imageCredits();// Reserve against a conservative input allowance plus the hard output/search caps. Settlement refunds unused units.
-const inputGuess=PRICING_CONFIG.maxInputTokensEstimate;return creditsForUsd(costUsd({input:inputGuess,output:maxOutTokens(action),searches:searchLimit(action)}));}
+const inputGuess=PRICING_CONFIG.maxInputTokensEstimate;return creditsForUsd(costUsd({input:inputGuess,output:maxOutTokens(action),searches:searchLimit(action,brief?.documentType)}));}
 async function debitBefore(uid,{action,projectId,brief}){const units=estimateCredits({action,brief});const {data,error}=await supabase.rpc('wryte_reserve_usage',{p_user_id:uid,p_action:action,p_project_id:projectId||null,p_estimated_credits:units});if(error)throw new Error('Credit service unavailable. Try again later.');if(!data?.ok) {const e=new Error(data?.error||'Not enough credits. Purchase a credit pack to continue.');e.status=402;throw e;}return {reservationId:data.reservation_id,units:data.reserved_credits||0,free:data.free||false};}
 async function settleUsage(reservationId,uid,usage,action,projectId){const actual=creditsForUsd(costUsd({input:Number(usage?.inputTokens||0),output:Number(usage?.outputTokens||0),searches:Number(usage?.searchCalls||0)}));const {data,error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservationId,p_user_id:uid,p_actual_credits:actual,p_usage:usage||{},p_action:action,p_project_id:projectId||null});if(error||data?.ok===false)throw new Error('Could not settle usage. Contact support before retrying.');return data;}
 app.get('/api/credits',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({credits:w.credits||0,freeGenerationsRemaining:Math.max(0,2-(w.free_generations_used||0)),unit:'credits'});}catch(e){res.status(500).json({error:'Unable to load credit balance.'});}});
+// ---- Output post-processing: derive plain text / word count server-side so the model only writes each thing once ----
+const escHtmlSrv=(s='')=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const htmlToText=(h)=>String(h||'').replace(/<(script|style)[\s\S]*?<\/\1>/gi,' ').replace(/<br\s*\/?>|<\/(p|div|h[1-6]|li|tr|blockquote)>/gi,'\n').replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').replace(/[ \t]+/g,' ').replace(/ ?\n ?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+const countWords=(t)=>(String(t).match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu)||[]).length;
+const slugifySrv=(s='')=>String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,80);
+function lengthRange(label=''){const m=String(label).match(/(\d[\d,]*)\s*[–-]\s*(\d[\d,]*)\s*words/i);return m?{min:Number(m[1].replace(/,/g,'')),max:Number(m[2].replace(/,/g,''))}:null;}
+function normalizeHtml(raw,{title='',article=false}={}){
+  let h=String(raw||'').trim().replace(/^```(?:html)?\s*/i,'').replace(/\s*```$/,'').trim();
+  if(h&&!/<\/?(p|h[1-6]|ul|ol|li|table|blockquote|div|section|article)\b/i.test(h))h=h.split(/\n{2,}/).map(p=>`<p>${escHtmlSrv(p.trim()).replace(/\n/g,'<br>')}</p>`).join('\n');
+  if(article&&title&&!/<h1[\s>]/i.test(h))h=`<h1>${escHtmlSrv(title)}</h1>\n${h}`;
+  return h;
+}
+const DOC_RULES={letter:'Use a standard letter layout where applicable: date, sender/return address if provided, recipient name and address if provided, salutation, clear paragraphs, courteous closing, and sender name. Do not invent addresses or facts.',email:'Use a concise subject/title, appropriate greeting, readable body, clear call to action when useful, sign-off and sender details if supplied. Avoid fake email addresses.',resume:'Create a professional ATS-friendly CV/resume with contact details only if supplied, professional summary, skills, experience, education and certifications as applicable. Never invent employers, qualifications, dates, metrics or contact information; use clear [placeholders] for missing essential details.',coverLetter:'Create a tailored cover letter with date and recipient details if supplied, role/company, relevant evidence from the user-provided experience, a professional opening, specific fit, and closing. Never invent experience.',proposal:'Use an executive summary, problem/opportunity, objectives, scope, approach, timeline, deliverables, budget only if provided, risks and next steps as applicable.',report:'Use a clear title, executive summary, background, methodology only if supplied, findings, analysis, recommendations and conclusion. Separate facts from assumptions.',businessPlan:'Use executive summary, business description, customer problem, offering, market and competitor analysis with uncertainty stated, marketing and operations, team, risks, and financial assumptions only where supplied. Do not fabricate verified market statistics.',meetingMinutes:'Use meeting title, date, attendees, agenda, discussion summary, decisions, action items with owners and deadlines only if supplied, and next meeting if known.',socialPost:'Create platform-appropriate content with a strong opening, concise body, suitable call to action and optional relevant hashtags. Avoid unsupported claims and platform policy violations.',productDescription:'Write a clear product title, customer benefits, features, use cases, specifications only if supplied, limitations and a truthful call to action. Never invent product certifications or performance claims.',pressRelease:'Use a standard press release structure: FOR IMMEDIATE RELEASE only if appropriate, headline, subheadline if useful, dateline only if supplied, lead paragraph, supporting facts, approved quote only if supplied (otherwise no fake quote), company boilerplate only from supplied facts, and media contact only if supplied.'};
+const SYSTEM_PROMPT=`You are Wyticle AI, an expert human-centered writer, researcher and editor.
+QUALITY BAR
+- Follow the user's brief exactly: topic, tone, audience, length, format, country and any named requirements. If the brief and your habits conflict, the brief wins.
+- Write specific, useful, natural prose: concrete examples, numbers and steps rather than generalities; varied sentence length; no filler, no repetition, no padding to hit length.
+- Avoid AI clichés and stock transitions ("In today's fast-paced world", "delve", "unlock", "game-changer", "in conclusion", "it's important to note", "navigating the landscape").
+- Use the spelling, currency, units and examples that fit the requested country or market.
+TRUTHFULNESS
+- Never invent facts, statistics, prices, laws, quotes, studies, names, credentials, personal anecdotes, addresses, URLs or citations. Specific figures and time-sensitive claims must come from the supplied research notes or the user's own text; otherwise speak in general, verifiable terms or use a clear [placeholder].
+- Apply E-E-A-T through accurate, well-supported information; claim first-hand experience only if the user supplied it.
+- Health, legal, financial and safety topics: give general educational information, note when to consult a qualified professional, and never present it as personalized professional advice.
+FORMAT
+- Output ONLY a single JSON object matching the schema. No markdown fences, no commentary.
+- "html" is clean semantic HTML using only h1-h4, p, ul, ol, li, strong, em, blockquote, table/thead/tbody/tr/th/td, hr and a. No inline styles, scripts, classes, images or full-page wrappers. Never use markdown syntax inside html.`;
+const diagnosisSchema={type:'object',properties:{diagnosis:{type:'object',properties:{score:{type:'integer'},findings:{type:'array',items:{type:'string'}}},required:['score','findings']}},required:['diagnosis']};
+const contentSchema={type:'object',properties:{title:{type:'string'},html:{type:'string'},seo:{type:'object',properties:{title:{type:'string'},description:{type:'string'},slug:{type:'string'},primaryKeyword:{type:'string'},relatedKeywords:{type:'array',items:{type:'string'}},readability:{type:'string'}},required:['title','description','slug','primaryKeyword','relatedKeywords','readability']}},required:['title','html','seo']};
+const documentSchema={type:'object',properties:{title:{type:'string'},html:{type:'string'}},required:['title','html']};
+const SCHEMA_HINT={diagnosis:'{"diagnosis":{"score":<integer 0-100>,"findings":["<prioritized, actionable finding>", ...]}}',content:'{"title":"...","html":"<h1>...</h1><p>...</p>","seo":{"title":"<=60 chars","description":"140-160 chars","slug":"lowercase-hyphenated","primaryKeyword":"...","relatedKeywords":["..."],"readability":"..."}}',document:'{"title":"...","html":"<h1>...</h1><p>...</p>"}'};
+function buildArticleGuidance(brief,range,hasResearch,researchEnabled){
+  const target=range?`Target ${range.min}-${range.max} words of article body (never below ${range.min}).`:`Length: ${brief.length||'appropriate for the topic'}.`;
+  const sections=range?Math.max(4,Math.round(range.min/220)):6;
+  return `Detect the primary keyword and related keywords from the topic. ${target} Structure: one H1 (a specific, benefit-led headline that contains the primary keyword naturally), an introduction that answers the reader's search intent in its first 100 words, about ${sections} H2 sections (use H3 where it helps scanning) each making a distinct point with an example, step or comparison, a short FAQ section when it fits the search intent, and a conclusion with one clear next step. Do not include SEO metadata inside the html. SEO title at most 60 characters; meta description 140-160 characters; slug lowercase with hyphens. ${hasResearch?'Use the RESEARCH NOTES for every specific figure, date, price or rule, and state the year for time-sensitive facts. If notes disagree, say so or leave the figure out.':(researchEnabled?'Live research was unavailable for this request: avoid precise statistics, prices, dates, laws and named studies unless they are universally established; write general, verifiable guidance instead.':'')}`;
+}
 app.post('/api/generate',auth,dbRequired,async(req,res)=>{
   let reservation=null;const {action='initial',project,brief={},instruction='',projectId,documentType='article'}=req.body||{};
   try{
-    if(!OPENAI_API_KEY&&!GEMINI_API_KEY)return res.status(503).json({error:'AI service is not configured. Add GEMINI_API_KEY for the Google AI Studio option (which may have free quota), or OPENAI_API_KEY.'});
+    if(!GEMINI_API_KEY)return res.status(503).json({error:'AI service is not configured. Set GEMINI_API_KEY (Google AI Studio) on the server.',code:'ai_not_configured'});
     if(!['initial','document','revision','fix','diagnose'].includes(action))return res.status(400).json({error:'Unsupported AI action.'});
-    if(action==='document'&&!['letter','email','resume','coverLetter','proposal','report','businessPlan','meetingMinutes','socialPost','productDescription','pressRelease'].includes(documentType))return res.status(400).json({error:'Choose a supported document type.'});
+    if(action==='document'&&!Object.keys(DOC_RULES).includes(documentType))return res.status(400).json({error:'Choose a supported document type.'});
     const briefSize=Buffer.byteLength(JSON.stringify(brief||{}),'utf8');
-    const existingBody=String(project?.body||'');
-    if(briefSize>30000||String(instruction||'').length>8000||existingBody.length>80000)return res.status(413).json({error:'This request is too large to process safely. Shorten the form details or draft and try again.'});
+    const existing=String(project?.body||'');
+    if(briefSize>30000||String(instruction||'').length>8000||existing.length>80000)return res.status(413).json({error:'This request is too large to process safely. Shorten the form details or draft and try again.'});
     if(['initial','document'].includes(action)&&(!String(brief.title||'').trim()||String(brief.style||'').trim().length<8||(action==='initial'&&!String(brief.niche||'').trim())))return res.status(400).json({error:'Add a clear title or purpose and at least 8 characters of detailed instructions.'});
+    if(['revision','fix','diagnose'].includes(action)&&!existing.trim())return res.status(400).json({error:'There is no draft to work on yet. Generate content first.'});
+    if(action==='revision'&&!String(instruction||'').trim())return res.status(400).json({error:'Describe the change you want to make.'});
+    const docType=brief.documentType||documentType||'article';
+    const isDocument=action==='document'||docType!=='article';
+    const isDiagnosis=action==='diagnose';
     const wallet=await ensureWallet(req.user.uid);const targetProject=projectId||project?.id||crypto.randomUUID();
     // Free trial follow-ups are reserved atomically in PostgreSQL. A failed request releases the slot.
     const trialIds=wallet.trial_project_ids||[];const trialProject=trialIds.includes(targetProject);
@@ -443,48 +585,94 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
       const {data:trial,error:trialError}=await supabase.rpc('wryte_reserve_trial_followup',{p_user_id:req.user.uid,p_project_id:targetProject,p_action:action,p_limit:PRICING_CONFIG.trialFollowupLimit});
       if(trialError)throw new Error('Credit service unavailable. Try again later.');
       if(trial?.ok)reservation={free:true,reservationId:trial.reservation_id,units:0};
-      else reservation=await debitBefore(req.user.uid,{action,projectId:targetProject,brief});
-    } else reservation=await debitBefore(req.user.uid,{action,projectId:targetProject,brief});
-    const existing=project?.body||'';const isDiagnosis=action==='diagnose';
-    const system=`You are Wyticle AI, an expert human-centered writer, researcher and editor. Produce specific, deeply useful, naturally human-sounding work that faithfully follows the user's requested tone and format. Avoid formulaic AI transitions, filler, repetition, robotic phrasing, fake personal anecdotes, invented facts, fake quotations and fabricated citations. Use web search for factual or current claims when useful; only cite sources actually returned by research. Respect niche-specific risk and never present medical, legal or financial content as personalized professional advice. Apply E-E-A-T through transparent, accurate, well-supported information and first-hand context only when supplied; never fabricate experience, credentials or expertise. Output only valid JSON matching the schema.`;
-    const diagnosisSchema={type:'object',properties:{diagnosis:{type:'object',properties:{score:{type:'integer'},findings:{type:'array',items:{type:'string'}}},required:['score','findings'],additionalProperties:false}},required:['diagnosis'],additionalProperties:false};
-    const articleSchema={type:'object',properties:{title:{type:'string'},html:{type:'string'},plainText:{type:'string'},seo:{type:'object',properties:{title:{type:'string'},description:{type:'string'},slug:{type:'string'},primaryKeyword:{type:'string'},relatedKeywords:{type:'array',items:{type:'string'}},wordCount:{type:'integer'},readability:{type:'string'}},required:['title','description','slug','primaryKeyword','relatedKeywords','wordCount','readability'],additionalProperties:false},sources:{type:'array',items:{type:'object',properties:{title:{type:'string'},url:{type:'string'},publisher:{type:'string'},supports:{type:'string'}},required:['title','url','publisher','supports'],additionalProperties:false}}},required:['title','html','plainText','seo','sources'],additionalProperties:false};
-    const docRules={letter:'Use a standard letter layout where applicable: date, sender/return address if provided, recipient name and address if provided, salutation, clear paragraphs, courteous closing, and sender name. Do not invent addresses or facts.',email:'Use a concise subject/title, appropriate greeting, readable body, clear call to action when useful, sign-off and sender details if supplied. Avoid fake email addresses.',resume:'Create a professional ATS-friendly CV/resume with contact details only if supplied, professional summary, skills, experience, education and certifications as applicable. Never invent employers, qualifications, dates, metrics or contact information; use clear placeholders for missing essential details.',coverLetter:'Create a tailored cover letter with date and recipient details if supplied, role/company, relevant evidence from the user-provided experience, a professional opening, specific fit, and closing. Never invent experience.',proposal:'Use an executive summary, problem/opportunity, objectives, scope, approach, timeline, deliverables, budget only if provided, risks and next steps as applicable.',report:'Use a clear title, executive summary, background, methodology only if supplied, findings, analysis, recommendations and conclusion. Separate facts from assumptions.',businessPlan:'Use executive summary, business description, customer problem, offering, market and competitor analysis with uncertainty stated, marketing and operations, team, risks, and financial assumptions only where supplied. Do not fabricate verified market statistics.',meetingMinutes:'Use meeting title, date, attendees, agenda, discussion summary, decisions, action items with owners and deadlines only if supplied, and next meeting if known.',socialPost:'Create platform-appropriate content with a strong opening, concise body, suitable call to action and optional relevant hashtags. Avoid unsupported claims and platform policy violations.',productDescription:'Write a clear product title, customer benefits, features, use cases, specifications only if supplied, limitations and a truthful call to action. Never invent product certifications or performance claims.',pressRelease:'Use a standard press release structure: FOR IMMEDIATE RELEASE only if appropriate, headline, subheadline if useful, dateline only if supplied, lead paragraph, supporting facts, approved quote only if supplied (otherwise no fake quote), company boilerplate only from supplied facts, and media contact only if supplied.'};
-    const isDocument=action==='document'||(brief.documentType&&brief.documentType!=='article');
-    const docType=brief.documentType||documentType||'article';
-    const userTask=isDiagnosis?`Perform a professional quality audit of this ${docType==='article'?'article':docType} and return only a realistic score from 0-100 plus concise, prioritized, actionable findings. Evaluate whether it fulfills the user's brief and intended outcome; completeness of required information; factual reliability and unsupported claims; correct genre-specific conventions and layout; clarity, tone, audience fit, structure, readability, grammar, consistency, accessibility and practical usability. For articles also assess search intent, SEO title/meta/heading structure, keyword naturalness and source support. For letters/emails assess sender/recipient context, salutation, tone, clear ask and closing. For resumes assess ATS readability, evidence-backed achievements, consistency and missing factual details without inventing credentials. For proposals/business plans assess scope, deliverables, timeline, assumptions, risks and feasibility. For reports assess scope, evidence, findings and recommendations. For minutes assess decisions, action owners and deadlines. For social/product/press content assess platform fit, truthful claims and required brand/announcement facts. Do not rewrite yet. Title: ${project?.title||brief.title}; brief: ${JSON.stringify(brief)}; existing HTML: ${existing}`:`Action: ${action}. Output type: ${isDocument?docType:'article'}. Title/purpose: ${brief.title||project?.title||''}. Requested style and instructions: ${brief.style||''}. Recipient: ${brief.recipient||'not supplied'}. Sender: ${brief.sender||'not supplied'}. Organization: ${brief.organization||'not supplied'}. Date: ${brief.date||'not supplied'}. Audience / target role: ${brief.audience||'infer only when safe'}. Country: ${brief.country||'not specified'}. Niche: ${brief.niche||project?.niche||'not applicable'}. Length: ${brief.length||'appropriate for this document type'}. Additional information: ${brief.additional||'None'}. Purpose and key requirements: ${brief.purpose||'As described by the user'}. Requested changes: ${instruction||'None'}. Existing content: ${existing||'(new project)'}. ${isDocument?(docRules[docType]||'Use the standard professional structure for this document type.'):'Detect primary and related keywords automatically. Use a strong H1 first, useful introduction, detailed body sections and conclusion. Return semantic article HTML only, not a full document. Keep SEO outside article body.'} Never invent facts, addresses, qualifications, quotes, names, sources or URLs. Use clear placeholders for important missing details instead of guessing. Produce clean semantic HTML with meaningful headings, paragraphs, lists and spacing. Preserve good content during revisions and fixes.`;
-    const body={model:OPENAI_MODEL,input:[{role:'system',content:system},{role:'user',content:userTask}],text:{format:{type:'json_schema',name:isDiagnosis?'article_diagnosis':'article_result',strict:true,schema:isDiagnosis?diagnosisSchema:articleSchema}},max_output_tokens:maxOutTokens(action)};
-    if(searchLimit(action)>0){body.tools=[{type:'web_search'}];body.max_tool_calls=searchLimit(action);}
-    let data,outputText,usage;
-    if(GEMINI_API_KEY){
-      const generated=await generateWithGemini({system,userTask,action});
-      data=generated.data;outputText=generated.outputText;usage=generated.usage;
+      else reservation=await debitBefore(req.user.uid,{action,projectId:targetProject,brief:{...brief,documentType:docType}});
+    } else reservation=await debitBefore(req.user.uid,{action,projectId:targetProject,brief:{...brief,documentType:docType}});
+
+    const title=String(project?.title||brief.title||'').slice(0,300);
+    const niche=brief.niche||project?.niche||'';
+    const range=!isDocument?lengthRange(brief.length):null;
+    // Step 1 (optional): live research with Google Search grounding.
+    const researchEnabled=searchLimit(action,docType)>0;
+    let research=null;
+    if(researchEnabled)research=await researchTopic({topic:`${title}${brief.style?` — ${String(brief.style).slice(0,600)}`:''}`,niche,country:brief.country,instruction});
+    const researchBlock=research?.notes?`\n\nRESEARCH NOTES (live Google Search results; the only permitted source for specific figures, dates, prices, laws and named studies):\n${research.notes}`:'';
+
+    // Step 2: write / revise / audit.
+    let userTask,schema,hint,temperature=0.7;
+    if(isDiagnosis){
+      schema=diagnosisSchema;hint=SCHEMA_HINT.diagnosis;temperature=0.2;
+      userTask=`Audit this ${docType==='article'?'article':docType} like a demanding senior editor. Return a realistic score from 0-100 (reserve 90+ for genuinely excellent work; most drafts score 60-85) and 4-8 concise, prioritized, actionable findings, most important first. Each finding must name the specific problem and how to fix it.\nCheck: does it fulfil the brief and intended outcome; completeness; unsupported or doubtful claims; genre conventions and layout; clarity, tone, audience fit, structure, readability, grammar and consistency. Articles: also search intent, title/heading structure, keyword naturalness, depth and source support. Letters/emails: sender/recipient context, tone, clear ask, closing. Resumes: ATS readability, evidence-backed achievements, missing factual details (never suggest inventing credentials). Proposals/plans: scope, deliverables, timeline, assumptions, risks, feasibility. Reports: evidence, findings, recommendations. Minutes: decisions, owners, deadlines. Social/product/press: platform fit, truthful claims, required facts.\nDo NOT rewrite the content.\n\nTitle: ${title}\nBrief: ${JSON.stringify(brief)}\n\nCONTENT TO AUDIT (HTML):\n${existing}`;
     }else{
-      const r=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:`Bearer ${OPENAI_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(120000)});data=await r.json();if(!r.ok)throw new Error(data.error?.message||'AI provider request failed');
-      if(data.status==='incomplete')throw new Error('The response was too long and was cut off. Choose a shorter length or fewer sections and try again. You were not charged.');
-      outputText=(data.output||[]).flatMap(item=>item.content||[]).filter(c=>c.type==='output_text').map(c=>c.text).join('\n');
-      usage={inputTokens:data.usage?.input_tokens||0,outputTokens:data.usage?.output_tokens||0,searchCalls:(data.output||[]).filter(x=>x.type==='web_search_call').length,model:OPENAI_MODEL,provider:'openai'};
+      schema=isDocument?documentSchema:contentSchema;hint=isDocument?SCHEMA_HINT.document:SCHEMA_HINT.content;
+      const brief_lines=`Output type: ${isDocument?docType:'article'}\nTitle/purpose: ${brief.title||project?.title||''}\nRequested style and instructions: ${brief.style||'(none)'}\nRecipient: ${brief.recipient||'not supplied'}\nSender: ${brief.sender||'not supplied'}\nOrganization: ${brief.organization||'not supplied'}\nDate: ${brief.date||'not supplied'}\nAudience / target role: ${brief.audience||'infer only when safe'}\nCountry: ${brief.country||'not specified'}\nNiche: ${niche||'not applicable'}\nLength: ${brief.length||'appropriate for this type'}\nPurpose and key requirements: ${brief.purpose||'as described above'}\nAdditional information: ${brief.additional||'none'}`;
+      const guidance=isDocument?(DOC_RULES[docType]||'Use the standard professional structure for this document type.'):buildArticleGuidance(brief,range,Boolean(research?.notes),researchEnabled);
+      if(action==='initial'||action==='document'){
+        userTask=`Create new content.\n${brief_lines}\n\nGUIDANCE: ${guidance}\nUse clear [placeholders] for important missing details instead of guessing.${researchBlock}`;
+      }else if(action==='revision'){
+        userTask=`Revise the existing content according to the requested changes. Return the COMPLETE updated content, not a diff or a summary. Apply the change thoroughly everywhere it applies, keep everything the user did not ask to change (facts, structure, voice, length), and keep the same output type.\nREQUESTED CHANGES: ${instruction}\n\n${brief_lines}\n\nGUIDANCE: ${guidance}${researchBlock}\n\nEXISTING CONTENT (HTML):\n${existing}`;
+      }else{
+        userTask=`Improve the existing content so it better fulfils its brief: fix clarity, structure, flow, tone, grammar, weak or generic passages, and gaps against the brief. Do not add unsupported facts and do not remove accurate content. Return the COMPLETE improved content in the same output type.${instruction?`\nExtra focus: ${instruction}`:''}\n\n${brief_lines}\n\nGUIDANCE: ${guidance}\n\nEXISTING CONTENT (HTML):\n${existing}`;
+      }
     }
-    if(!outputText)throw new Error('The AI returned no content. Please retry.');let parsed;try{parsed=JSON.parse(outputText.replace(/^```(?:json)?\s*|\s*```$/g,''))}catch{throw new Error('The AI response could not be parsed. Please retry.');}parsed.usage=usage;
+    userTask+=`\n\nReturn ONLY JSON in exactly this shape: ${hint}`;
+    const check=(p)=>{
+      if(isDiagnosis){if(!p.diagnosis||!Array.isArray(p.diagnosis.findings)||!p.diagnosis.findings.length||!Number.isFinite(Number(p.diagnosis.score)))throw invalidOutput('diagnosis missing score/findings');return;}
+      if(typeof p.html!=='string'||countWords(htmlToText(p.html))<(isDocument?25:150))throw invalidOutput('content missing or far too short');
+      if(range&&action==='initial'&&countWords(htmlToText(p.html))<range.min*0.7)throw invalidOutput(`only ${countWords(htmlToText(p.html))} words, wanted ${range.min}+`);
+    };
+    const generated=await generateStructured({system:SYSTEM_PROMPT,userTask,schema,action,temperature,check});
+    const parsed=generated.parsed;
+    // Bill the successful generation plus the research request; failed upstream attempts are absorbed, never charged to the user.
+    const usage={inputTokens:generated.usage.inputTokens+(research?.usage.inputTokens||0),outputTokens:generated.usage.outputTokens+(research?.usage.outputTokens||0),searchCalls:research?1:0,model:generated.usage.model,researchModel:research?.usage.model||null,provider:'gemini'};
+    let result;
+    if(isDiagnosis){
+      result={diagnosis:{score:Math.max(0,Math.min(100,Math.round(Number(parsed.diagnosis.score)))),findings:parsed.diagnosis.findings.map(x=>String(x).trim()).filter(Boolean).slice(0,10)}};
+    }else{
+      const finalTitle=String(parsed.title||title||'Untitled').trim().slice(0,200);
+      const html=normalizeHtml(parsed.html,{title:finalTitle,article:!isDocument});
+      const plainText=htmlToText(html);
+      result={title:finalTitle,html,plainText};
+      if(!isDocument){
+        const s=parsed.seo||{};
+        result.seo={title:String(s.title||finalTitle).slice(0,70),description:String(s.description||'').slice(0,200),slug:slugifySrv(s.slug||finalTitle),primaryKeyword:String(s.primaryKeyword||''),relatedKeywords:(Array.isArray(s.relatedKeywords)?s.relatedKeywords:[]).map(String).slice(0,10),wordCount:countWords(plainText),readability:String(s.readability||'')};
+        result.sources=research?.sources||[];
+      }
+    }
+    result.usage=usage;
     if(reservation?.reservationId)await settleUsage(reservation.reservationId,req.user.uid,usage,action,targetProject);
-    else if(reservation?.free&&action==='initial') {const {error}=await supabase.rpc('wryte_register_trial_project',{p_user_id:req.user.uid,p_project_id:targetProject});if(error)throw new Error('Could not save free article entitlement. Please contact support.');}
-    const updated=await ensureWallet(req.user.uid);parsed.billing={credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0)),chargedCredits:reservation?.free?0:undefined,projectId:targetProject};parsed.documentType=docType;sendPushToUser(req.user.uid,{title:isDiagnosis?'Your content check is ready':'Your content is ready',body:isDiagnosis?'Wyticle AI finished checking your content.':'Wyticle AI finished generating your content.',type:'generation_complete',projectId:targetProject});res.json(parsed);
-  }catch(e){if(reservation?.reservationId){try{await supabase.rpc('wryte_release_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid});}catch{}}console.error('Generate:',e.message);res.status(e.status||500).json({error:e.status===402?e.message:(e.message||'Unexpected generation error. Please retry.')});}
+    else if(reservation?.free&&action==='initial'){const {error}=await supabase.rpc('wryte_register_trial_project',{p_user_id:req.user.uid,p_project_id:targetProject});if(error)throw new Error('Could not save free article entitlement. Please contact support.');}
+    const updated=await ensureWallet(req.user.uid);
+    result.billing={credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0)),chargedCredits:reservation?.free?0:undefined,projectId:targetProject};
+    result.documentType=docType;
+    sendPushToUser(req.user.uid,{title:isDiagnosis?'Your content check is ready':'Your content is ready',body:isDiagnosis?'Wyticle AI finished checking your content.':'Wyticle AI finished generating your content.',type:'generation_complete',projectId:targetProject});
+    res.json(result);
+  }catch(e){
+    if(reservation?.reservationId){try{await supabase.rpc('wryte_release_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid});}catch{}}
+    console.error('Generate:',e.log||e.message);
+    const status=e instanceof AIError?e.status:(e.status>=400&&e.status<600?e.status:500);
+    res.status(status).json({error:e instanceof AIError||e.status?e.message:(e.message||'Unexpected generation error. Please retry.'),code:e.code||null});
+  }
 });
 
 app.post('/api/image',auth,dbRequired,async(req,res)=>{
   let reservation=null;
   try{
-    if(!OPENAI_API_KEY)return res.status(503).json({error:'Image generation is not configured.'});
+    if(!GEMINI_API_KEY)return res.status(503).json({error:'Image generation is not configured. Set GEMINI_API_KEY on the server.',code:'ai_not_configured'});
     const {projectId,title,niche,style,details=''}=req.body||{};if(!projectId||!title)return res.status(400).json({error:'Article project and title are required.'});
     await ensureWallet(req.user.uid);
     // Image generation is a separately priced premium operation to protect margins; users can still upload their own image for free.
     reservation=await debitBefore(req.user.uid,{action:'image',projectId,brief:{length:'image'}});
-    const prompt=`Create a polished, original editorial featured image for a blog article. Topic: ${String(title).slice(0,500)}. Niche: ${String(niche||'general').slice(0,120)}. Visual style requested: ${String(style||'professional, clear, modern').slice(0,300)}. Additional context: ${String(details).slice(0,500)}. Composition should be high quality, readable at blog thumbnail size, with no text, no logos, no watermarks, no fake brand marks. Do not create misleading depictions for medical, financial, political, or news claims.`;
-    const r=await fetch('https://api.openai.com/v1/images/generations',{method:'POST',headers:{Authorization:`Bearer ${OPENAI_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({model:process.env.OPENAI_IMAGE_MODEL||'gpt-image-1',prompt,size:'1536x1024',quality:'medium',n:1,output_format:'jpeg'}),signal:AbortSignal.timeout(120000)});const data=await r.json();if(!r.ok)throw new Error(data.error?.message||'Image generation failed.');const b64=data.data?.[0]?.b64_json;if(!b64)throw new Error('Image service returned no image.');
-    if(reservation?.reservationId){const cost=imageCredits();const {error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid,p_actual_credits:cost,p_usage:{imageModel:process.env.OPENAI_IMAGE_MODEL||'gpt-image-1'},p_action:'image',p_project_id:projectId});if(error)throw new Error('Could not settle image usage.');}
-    const updated=await ensureWallet(req.user.uid);res.json({dataUrl:`data:image/jpeg;base64,${b64}`,credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0))});
-  }catch(e){if(reservation?.reservationId){try{await supabase.rpc('wryte_release_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid});}catch{}}console.error('Image generation:',e.message);res.status(e.status||500).json({error:e.message||'Image generation failed.'});}
+    const prompt=`Create a polished, original editorial featured image for a blog article, 16:9 landscape. Topic: ${String(title).slice(0,500)}. Niche: ${String(niche||'general').slice(0,120)}. Visual style requested: ${String(style||'professional, clear, modern').slice(0,300)}. Additional context: ${String(details).slice(0,500)}. Composition should be high quality, readable at blog thumbnail size, with a clear focal subject. Absolutely no text, letters, numbers, logos, watermarks or brand marks anywhere in the image. Do not create misleading depictions for medical, financial, political, or news claims.`;
+    const img=await generateImageWithGemini(prompt);
+    if(reservation?.reservationId){const {error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid,p_actual_credits:imageCredits(),p_usage:{imageModel:img.model,provider:'gemini'},p_action:'image',p_project_id:projectId});if(error)throw new Error('Could not settle image usage.');}
+    const mime=/^image\/(png|jpeg|webp|gif)$/i.test(img.mime)?img.mime.toLowerCase():'image/png';
+    const updated=await ensureWallet(req.user.uid);res.json({dataUrl:`data:${mime};base64,${img.b64}`,credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0))});
+  }catch(e){
+    if(reservation?.reservationId){try{await supabase.rpc('wryte_release_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid});}catch{}}
+    console.error('Image generation:',e.log||e.message);
+    const status=e instanceof AIError?e.status:(e.status>=400&&e.status<600?e.status:500);
+    res.status(status).json({error:e instanceof AIError||e.status?e.message:(e.message||'Image generation failed.'),code:e.code||null});
+  }
 });
 
 // Flutterwave v4 card flow (NGN). It deliberately does not call v3 endpoints.
@@ -610,7 +798,7 @@ app.use((err,_req,res,_next)=>{
   console.error('Unhandled error:',err?.message||err);res.status(err?.status||500).json({error:'Unexpected server error.'});
 });
 process.on('unhandledRejection',e=>console.error('Unhandled rejection:',e?.message||e));
-{const need=['FIREBASE_SERVICE_ACCOUNT_JSON|GOOGLE_APPLICATION_CREDENTIALS','SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY','TOKEN_ENCRYPTION_KEY','OPENAI_API_KEY','GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET','APP_URL','API_PUBLIC_URL','ALLOWED_ORIGIN'];
+{const need=['FIREBASE_SERVICE_ACCOUNT_JSON|GOOGLE_APPLICATION_CREDENTIALS','SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY','TOKEN_ENCRYPTION_KEY','GEMINI_API_KEY','GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET','APP_URL','API_PUBLIC_URL','ALLOWED_ORIGIN'];
 const missing=need.filter(n=>!n.split('|').some(k=>process.env[k]));if(missing.length)console.warn('[config] Missing environment variables:',missing.join(', '));
 if(process.env.TOKEN_ENCRYPTION_KEY&&Buffer.from(process.env.TOKEN_ENCRYPTION_KEY,'base64').length!==32)console.warn('[config] TOKEN_ENCRYPTION_KEY must decode to exactly 32 bytes.');
 if(process.env.NODE_ENV==='production'&&!allowedOrigins.length)console.warn('[config] ALLOWED_ORIGIN is empty: browser requests will be rejected in production.');}

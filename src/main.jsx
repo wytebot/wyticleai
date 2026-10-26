@@ -17,7 +17,7 @@ import { Activity, Download, RefreshCw, ArrowLeft, ArrowRight, ArrowDown, ArrowU
 import './styles.css';
 
 // Firebase Web configuration is bundled so browser login works without Vite env setup.
-const firebaseConfig = {
+const bundledFirebaseConfig = {
   apiKey: "AIzaSyCHfX3VgBjJqBR1MHivxvB_B5ZwdPTbBsk",
   authDomain: "wryteai-62356.firebaseapp.com",
   projectId: "wryteai-62356",
@@ -26,6 +26,13 @@ const firebaseConfig = {
   appId: "1:589252246114:web:890b9ee1f90735d40def3b",
   measurementId: "G-5HNJ2KRHCZ",
 };
+// VITE_FIREBASE_CONFIG (full Firebase web config JSON) overrides the bundled project; VITE_FIREBASE_AUTH_DOMAIN only swaps the auth domain
+// (use your own domain proxied to Firebase's /__/auth/ handler so redirect sign-in survives browsers that block third-party storage).
+function readFirebaseConfig(){
+  try{const raw=import.meta.env.VITE_FIREBASE_CONFIG;if(raw){const c=JSON.parse(raw);if(c?.apiKey&&c?.projectId&&c?.appId)return c;console.warn('VITE_FIREBASE_CONFIG ignored: needs apiKey, projectId and appId.');}}catch(e){console.warn('VITE_FIREBASE_CONFIG is not valid JSON; using bundled config.');}
+  const domain=import.meta.env.VITE_FIREBASE_AUTH_DOMAIN;return domain?{...bundledFirebaseConfig,authDomain:domain}:bundledFirebaseConfig;
+}
+const firebaseConfig = readFirebaseConfig();
 const firebaseReady = true;
 let auth = null;
 try { auth = getAuth(initializeApp(firebaseConfig)); } catch (e) { console.warn('Firebase initialization:', e); }
@@ -134,6 +141,7 @@ function App(){
   const [welcomeSeen,setWelcomeSeen] = useState(false);
   const [resumeReady,setResumeReady] = useState(false);
   const signedInRef = useRef(false);
+  const lastAcceptRef = useRef({uid:'',at:0});
   const [editorHtml,setEditorHtml] = useState('');
   const [autoSaveState,setAutoSaveState] = useState('Saved');
   const [scheduleAt,setScheduleAt] = useState('');
@@ -150,13 +158,19 @@ function App(){
   useEffect(()=>{ if(!resumeReady) return; const timer=setTimeout(async()=>{try{const db=await dbPromise; const settingsDraft={driveFolderId:settings.driveFolderId||'',driveConnected:Boolean(settings.driveConnected)}; await db.put('settings',{key:'resume-state',value:{page:formOpen?'workspace':(['article','document','preview','editor'].includes(page)?page:'workspace'),documentType,form,formOpen,activeId:active?.id||null,modal,revision,destinations,scheduleAt,editorHtml:'',settingsDraft,updatedAt:now()}});}catch(e){console.warn('Auto-save workspace state:',e);}},180); return()=>clearTimeout(timer); },[resumeReady,page,form,formOpen,active?.id,modal,revision,destinations,scheduleAt,editorHtml,settings.driveFolderId,settings.driveConnected]);
   useEffect(()=>{
     if(Capacitor.isNativePlatform() || !auth) return;
-    getRedirectResult(auth).catch(e=>{ if(e?.code) setAuthError(friendlyAuthError(e)); });
+    let alive=true;let pending=false;try{pending=sessionStorage.getItem('wryte-auth-redirect')==='1';}catch{}
+    if(pending)setAuthBusy(true); // returning from Google: keep the sign-in button busy instead of flashing the signed-out screen
+    getRedirectResult(auth).then(cred=>{if(alive&&cred?.user)acceptSignedInUser(cred.user,false);}).catch(e=>{ if(alive&&e?.code) setAuthError(friendlyAuthError(e)); }).finally(()=>{try{sessionStorage.removeItem('wryte-auth-redirect');}catch{}if(alive&&pending)setAuthBusy(false);});
+    return ()=>{alive=false;};
   },[]);
   useEffect(()=>{
     let alive=true;
     if(Capacitor.isNativePlatform()){
       FirebaseAuthentication.getCurrentUser().then(result=>{const nativeUser=result?.user||result;if(alive&&nativeUser?.uid)acceptSignedInUser(nativeUser,true);}).catch(e=>console.warn('Native auth restore:',e.message));
-      return ()=>{alive=false;};
+      // Keep the UI in step with the native Firebase session (restored session, expiry, revoked account, sign-out elsewhere).
+      let handle=null;
+      FirebaseAuthentication.addListener('authStateChange',change=>{if(!alive)return;if(change?.user?.uid){if(!signedInRef.current)acceptSignedInUser(change.user,true);}else if(signedInRef.current){signedInRef.current=false;setFirebaseUser(null);setUser(null);setConnectedSites([]);setPage('signin');setAuthError('You were signed out. Sign in again to continue.');}}).then(h=>{if(alive)handle=h;else h.remove();}).catch(e=>console.warn('Native auth listener:',e?.message));
+      return ()=>{alive=false;handle?.remove?.();};
     }
     if(!auth)return;
     const unsub=onAuthStateChanged(auth,u=>{if(!alive)return;if(u)acceptSignedInUser(u,false);else{setFirebaseUser(null);setUser(null);setConnectedSites([]);}});
@@ -164,13 +178,29 @@ function App(){
   },[]);
   async function acceptSignedInUser(rawUser,isNative=false){
     if(!rawUser?.uid)return;
+    // The popup result, the redirect result and onAuthStateChanged can all report the same sign-in; sync the account only once.
+    const last=lastAcceptRef.current;if(last.uid===rawUser.uid&&Date.now()-last.at<4000&&signedInRef.current)return;lastAcceptRef.current={uid:rawUser.uid,at:Date.now()};
     const normalized={uid:rawUser.uid,displayName:rawUser.displayName||rawUser.name||'Writer',email:rawUser.email||'',photoURL:rawUser.photoURL||rawUser.photoUrl||null};
     signedInRef.current=true;setFirebaseUser(isNative?normalized:rawUser);setUser({uid:normalized.uid,name:normalized.displayName,email:normalized.email,photoURL:normalized.photoURL});setPage(p=>['welcome','signin'].includes(p)?'workspace':p);
     try{await loadUserProjects(normalized.uid);const authUser=isNative?normalized:rawUser;const account=await refreshAccount(authUser);const pending=localStorage.getItem('wryte-pending-payment');if(pending&&API_BASE){try{const paid=await apiFetch('/api/billing/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reference:pending})},authUser);if(paid.status==='succeeded'){localStorage.removeItem('wryte-pending-payment');await refreshAccount(authUser);setToast(paid.addedCredits>0?`Payment successful · ${Number(paid.addedCredits).toLocaleString()} credits added`:'Your payment was already credited.');}else if(paid.status==='failed'){localStorage.removeItem('wryte-pending-payment');setToast(paid.message||'Your last payment did not go through.');}}catch(pe){if(pe.status===404)localStorage.removeItem('wryte-pending-payment');else console.warn('Pending payment check:',pe.message);}}// Do not launch Blogger OAuth automatically after sign-in; users connect it explicitly from Connected sites.
     }catch(e){console.warn('Account sync:',e.message);if(API_BASE)setToast(e.message||'Your sign-in worked, but account sync needs attention.');}
   }
-  async function tokenHeaders(u=firebaseUser){if(!u)throw new Error('Sign in with Google to continue.');if(Capacitor.isNativePlatform()){const result=await FirebaseAuthentication.getIdToken();const token=typeof result==='string'?result:result?.token;if(!token)throw new Error('Your Google session needs refreshing. Please sign in again.');return {Authorization:`Bearer ${token}`};}if(typeof u.getIdToken!=='function')throw new Error('Your sign-in session needs refreshing. Please sign in again.');return {Authorization:`Bearer ${await u.getIdToken()}`};}
-  async function apiFetch(path,options={},u=firebaseUser){ if(!API_BASE) throw new Error('The API URL is not configured for this installed app. Set VITE_API_BASE_URL to your production domain and rebuild the APK.'); const authHeaders=await tokenHeaders(u); const {timeoutMs=90000,...fetchOptions}=options; const ctrl=new AbortController(); const timer=setTimeout(()=>ctrl.abort(),timeoutMs); let r; try{ r=await fetch(`${API_BASE}${path}`,{...fetchOptions,signal:ctrl.signal,headers:{...authHeaders,...(fetchOptions.headers||{})}}); }catch(fe){ const err=new Error(fe?.name==='AbortError'?'This is taking longer than expected. Please check your connection and try again.':'Could not reach Wyticle. Check your internet connection and try again.'); err.status=0; throw err; } finally{ clearTimeout(timer); } const data=await r.json().catch(()=>({})); if(!r.ok){const fallback=[502,503,504,524].includes(r.status)?'The server is busy or timed out. Please try again in a moment.':`Request failed (${r.status})`;const err=new Error(data.error||fallback);err.status=r.status;err.code=data.code||null;throw err;} return data; }
+  async function tokenHeaders(u=firebaseUser,forceRefresh=false){if(!u)throw new Error('Sign in with Google to continue.');if(Capacitor.isNativePlatform()){const result=await FirebaseAuthentication.getIdToken({forceRefresh});const token=typeof result==='string'?result:result?.token;if(!token)throw new Error('Your Google session needs refreshing. Please sign in again.');return {Authorization:`Bearer ${token}`};}if(typeof u.getIdToken!=='function')throw new Error('Your sign-in session needs refreshing. Please sign in again.');return {Authorization:`Bearer ${await u.getIdToken(forceRefresh)}`};}
+  async function apiFetch(path,options={},u=firebaseUser){
+    if(!API_BASE) throw new Error('The API URL is not configured for this installed app. Set VITE_API_BASE_URL to your production domain and rebuild the APK.');
+    const {timeoutMs=90000,...fetchOptions}=options;
+    for(let attempt=0;attempt<2;attempt++){
+      let authHeaders;try{authHeaders=await tokenHeaders(u,attempt>0);}catch(te){const err=new Error(te?.message||'Your Google session needs refreshing. Please sign in again.');err.status=401;err.code='session_expired';throw err;}
+      const ctrl=new AbortController();const timer=setTimeout(()=>ctrl.abort(),timeoutMs);let r;
+      try{ r=await fetch(`${API_BASE}${path}`,{...fetchOptions,signal:ctrl.signal,headers:{...authHeaders,...(fetchOptions.headers||{})}}); }
+      catch(fe){ const err=new Error(fe?.name==='AbortError'?'This is taking longer than expected. Please check your connection and try again.':'Could not reach Wyticle. Check your internet connection and try again.'); err.status=0; throw err; }
+      finally{ clearTimeout(timer); }
+      const data=await r.json().catch(()=>({}));
+      if(r.status===401&&attempt===0)continue; // the ID token may simply have expired: force-refresh it and retry once
+      if(!r.ok){const fallback=[502,503,504,524].includes(r.status)?'The server is busy or timed out. Please try again in a moment.':`Request failed (${r.status})`;const err=new Error(data.error||fallback);err.status=r.status;err.code=data.code||null;throw err;}
+      return data;
+    }
+  }
   async function refreshAccount(u=firebaseUser){ if(!API_BASE||!u) return; const data=await apiFetch('/api/me',{},u); let siteRows=(data.connectedSites||[]).filter(x=>x.provider==='blogger'); try{const sitesData=await apiFetch('/api/sites',{},u);siteRows=(sitesData.sites||[]).filter(x=>x.provider==='blogger');}catch{} setConnectedSites(siteRows); setSelectedBlogId(current=>{const valid=siteRows.some(x=>x.id===current);const next=valid?current:(siteRows[0]?.id||'');if(next!==current){dbPromise.then(db=>db.put('settings',{key:'selectedBloggerBlogId',value:next})).catch(()=>{});}return next;}); let drive={};try{drive=await apiFetch('/api/drive/settings',{},u);}catch{} await persistSettings({...settings,credits:data.wallet?.credits||0,freeGenerations:data.wallet?.freeGenerationsRemaining??2,bloggerConnected:(data.connectedSites||[]).some(x=>x.provider==='blogger'),driveFolderId:drive.folderId||'',driveConnected:Boolean(drive.connected)}); try{const packs=await apiFetch('/api/billing/packs',{},u);setCreditPacks(packs.packs||[]);}catch{} return data; }
   useEffect(()=>{ const params=new URLSearchParams(window.location.search); const returnedRef=params.get('payment_ref'); if(returnedRef&&/^[a-zA-Z0-9_-]{8,80}$/.test(returnedRef)){localStorage.setItem('wryte-pending-payment',returnedRef);window.history.replaceState({},'',window.location.pathname);} if(params.get('connect')==='blogger_success'){setToast('Blogger connected successfully');window.history.replaceState({},'',window.location.pathname);} else if(params.get('connect')==='blogger_failed'){setToast('Blogger connection failed. Please try again.');window.history.replaceState({},'',window.location.pathname);} },[]);
   useEffect(()=>{if(!Capacitor.isNativePlatform())return;let listener,cancelled=false;CapacitorApp.addListener('appUrlOpen',async event=>{try{const url=new URL(event.url);const connect=url.searchParams.get('connect');const payment=url.searchParams.get('payment_ref');if(connect==='blogger_success'){await refreshAccount();setToast('Blogger connected successfully');}else if(connect==='blogger_failed'){setToast('Blogger connection failed. Please try again.');}if(payment){localStorage.setItem('wryte-pending-payment',payment);await verifyPendingPayment();}await Browser.close().catch(()=>{});}catch(e){console.warn('Deep link handling:',e.message);}}).then(v=>{if(cancelled)v.remove();else listener=v;});return()=>{cancelled=true;listener?.remove?.();};},[firebaseUser]);
@@ -209,7 +239,36 @@ function App(){
   async function loadUserProjects(uid){const db=await dbPromise;const all=await db.getAll('projects');for(const p of all.filter(x=>!x.ownerUid)){p.ownerUid=uid;await db.put('projects',p);}setProjects((await db.getAll('projects')).filter(x=>x.ownerUid===uid).sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt)));}
   const persistSettings = async next => { const safe={...next}; setSettings(safe); const db=await dbPromise; await db.put('settings',{key:'main',value:safe}); };
   const goSignin = ()=>{localStorage.setItem('wryte-welcome-seen','1');setWelcomeSeen(true);setPage('signin');};
-  async function signInGoogle(){setAuthError('');setAuthBusy(true);try{if(Capacitor.isNativePlatform()){const result=await FirebaseAuthentication.signInWithGoogle();const current=result?.user?result:await FirebaseAuthentication.getCurrentUser();const nativeUser=current?.user||current;if(!nativeUser?.uid)throw new Error('Google did not return an authenticated account. Check that Google sign-in is enabled in Firebase and the Android SHA fingerprints are registered.');await acceptSignedInUser(nativeUser,true);return;}if(!auth){setAuthError('Google sign-in is unavailable. Enable Google as a sign-in provider in Firebase Authentication and check the authorized domains.');return;}const provider=new GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});try{const cred=await signInWithPopup(auth,provider);if(cred?.user)await acceptSignedInUser(cred.user,false);}catch(pe){if(['auth/popup-blocked','auth/operation-not-supported-in-this-environment'].includes(pe?.code))await signInWithRedirect(auth,provider);else throw pe;}}catch(e){setAuthError(friendlyAuthError(e));}finally{setAuthBusy(false);}}
+  async function signInGoogle(){
+    if(authBusy)return; // ignore double taps
+    setAuthError('');setAuthBusy(true);
+    try{
+      if(Capacitor.isNativePlatform()){
+        const result=await FirebaseAuthentication.signInWithGoogle();
+        // The plugin normally returns the user directly; if not, ask the native SDK for the session it just created.
+        let nativeUser=result?.user||null;
+        if(!nativeUser?.uid){const current=await FirebaseAuthentication.getCurrentUser();nativeUser=current?.user||current;}
+        if(!nativeUser?.uid)throw new Error('Google did not return an authenticated account. Check that Google sign-in is enabled in Firebase and the Android SHA fingerprints are registered.');
+        await acceptSignedInUser(nativeUser,true);return;
+      }
+      if(!auth){setAuthError('Google sign-in is unavailable. Enable Google as a sign-in provider in Firebase Authentication and check the authorized domains.');return;}
+      if(isEmbeddedBrowser()){setAuthError('Google blocks sign-in inside this in-app browser. Open this page in Chrome or Safari and try again.');return;}
+      if(!navigator.onLine){setAuthError('You appear to be offline. Check your connection and try again.');return;}
+      const provider=new GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});
+      const useRedirect=()=>{try{sessionStorage.setItem('wryte-auth-redirect','1');}catch{}return signInWithRedirect(auth,provider);};
+      // Installed PWAs (esp. iOS) cannot reliably open popups; use the full-page redirect there.
+      if(isStandalonePwa()){await useRedirect();return;}
+      try{
+        const cred=await signInWithPopup(auth,provider);
+        if(cred?.user)await acceptSignedInUser(cred.user,false);
+      }catch(pe){
+        if(['auth/popup-blocked','auth/operation-not-supported-in-this-environment','auth/web-storage-unsupported'].includes(pe?.code)){await useRedirect();return;}
+        if(pe?.code==='auth/cancelled-popup-request')return; // a newer sign-in attempt replaced this one
+        throw pe;
+      }
+    }catch(e){setAuthError(friendlyAuthError(e));}
+    finally{setAuthBusy(false);}
+  }
   function updateForm(k,v){setForm(f=>({...f,[k]:v}));setFormError('');}
   const validForm = form.title.trim().length>=3 && form.style.trim().length>=8 && (documentType!=='article'||form.niche!=='Other / custom'||form.customNiche.trim().length>=2);
   function openNew(){setModal('tools');setMenuOpen(false);}
@@ -225,10 +284,19 @@ function App(){
       const result=await apiFetch('/api/generate',{method:'POST',timeoutMs:200000,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       if(result.billing) await persistSettings({...settings,credits:result.billing.credits??settings.credits,freeGenerations:result.billing.freeGenerationsRemaining??settings.freeGenerations});
       if(kind==='diagnose'){setDiagnosis(result.diagnosis||{score:result.score||88,findings:result.findings||['Review any claims that need a primary source.','Consider adding a more specific example to the second section.']});setToast(`${documentLabel} diagnosis is ready`);return;}
-      const p={...(active||{}),id:projectId,title:result.title||form.title.trim(),documentType:result.documentType||documentType,niche:form.niche==='Other / custom'?form.customNiche:form.niche,brief:{...form,documentType},body:result.html||result.body||'',plainText:result.plainText||stripHtml(result.html||result.body||''),seo:result.seo||{},sources:result.sources||[],featuredImage:result.featuredImage||null,updatedAt:now(),status:active?.status||'Draft',isApproved:false,version:(active?.version||0)+1,usage:result.usage||null};
+      const p={...(active||{}),id:projectId,title:result.title||form.title.trim(),documentType:result.documentType||documentType,niche:form.niche==='Other / custom'?form.customNiche:form.niche,brief:{...form,documentType},body:result.html||result.body||'',plainText:result.plainText||stripHtml(result.html||result.body||''),seo:result.seo||{},sources:(result.sources&&result.sources.length)?result.sources:(active?.sources||[]),featuredImage:result.featuredImage||active?.featuredImage||null,updatedAt:now(),status:active?.status||'Draft',isApproved:false,version:(active?.version||0)+1,usage:result.usage||null};
       done=true;setActive(p);setResponse(p);setDiagnosis(null);setShowSeo(false);setPage(p.documentType&&p.documentType!=='article'?'document':'article');setChangeHistory(h=>[...h,{kind,at:now(),instruction}]);await saveProject(p);
       setToast(kind==='initial'?(p.documentType==='article'?'Your article is ready':`Your ${documentLabel.toLowerCase()} is ready`):'Your draft has been updated');
-    } catch(e){const msg=e.message||'Something went wrong. Please try again.';setFormError(msg);setToast(done?`Generated, but could not save on this device: ${msg}`:msg);if(kind==='initial'&&!done&&e.status!==402){setFormOpen(true);setPage('workspace');}if(e.status===402){setModal('credits');setPayStep('pick');try{await refreshAccount();}catch{}}} finally{setLoading(false);}
+    } catch(e){
+      if(e.status===402){ // out of credits: one clear message, no stale error left behind in the form
+        setFormError('');setToast('You are out of credits. Add credits to continue — your details are saved.');
+        if(kind==='initial'&&!done){setFormOpen(false);}
+        setModal('credits');setPayStep('pick');try{await refreshAccount();}catch{}
+      } else {
+        const msg=e.message||'Something went wrong. Please try again.';setFormError(msg);setToast(done?`Generated, but could not save on this device: ${msg}`:msg);
+        if(kind==='initial'&&!done){setFormOpen(true);setPage('workspace');}
+      }
+    } finally{setLoading(false);}
   }
   function openProject(p){setActive(p);setResponse(p);setDocumentType(p.documentType||'article');setForm({...form,...(p.brief||{}),title:p.title,niche:p.niche||'Other / custom'});setPage(p.documentType&&p.documentType!=='article'?'document':'article');setDiagnosis(null);setFormOpen(false);}
   async function approve(){if(!response||response.documentType&&response.documentType!=='article'){setModal('download-format');setDownloadProject(response);return;}const p={...response,isApproved:true,updatedAt:now()};setActive(p);setResponse(p);await saveProject(p);setPage('preview');setShowSeo(false);if(!settings.driveFolderId||!settings.driveConnected)setModal('drive-nudge');}
@@ -256,7 +324,7 @@ function App(){
         if(data.status==='succeeded'){
           localStorage.removeItem('wryte-pending-payment');
           try{await refreshAccount();}catch{await persistSettings({...settings,credits:Number(data.credits??settings.credits),freeGenerations:Number(settings.freeGenerations||0)});}
-          setToast(data.addedCredits>0?`Payment successful · ${Number(data.addedCredits).toLocaleString()} credits added`:'This payment was already credited. Your balance is up to date.');resetPay();return;
+          setFormError('');setToast(data.addedCredits>0?`Payment successful · ${Number(data.addedCredits).toLocaleString()} credits added`:'This payment was already credited. Your balance is up to date.');resetPay();return;
         }
         if(data.status==='failed'){localStorage.removeItem('wryte-pending-payment');setToast(data.message||'Payment failed. You can try again.');resetPay();return;}
         if(data.state?.step==='pin'||data.state?.step==='otp'){handlePayState(data.state,ref);return;}
@@ -290,11 +358,11 @@ function App(){
     catch(e){setToast(e.message||'Authorization failed');setPayPin('');setPayOtp('');}
     finally{setBillingBusy(false);}
   }
-  useEffect(()=>{if(modal!=='credits')resetPay();},[modal]);
+  useEffect(()=>{if(modal!=='credits')resetPay();else setFormError('');},[modal]);
   useEffect(()=>{if(modal==='drive'&&user&&settings.driveFolderId)loadDriveFiles();},[modal,user?.uid,settings.driveFolderId]);
-  async function verifyPendingPayment(){const reference=localStorage.getItem('wryte-pending-payment');if(!reference){setToast('No pending payment found');return;}setBillingBusy(true);try{const data=await apiFetch('/api/billing/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reference})});if(data.status==='succeeded'){localStorage.removeItem('wryte-pending-payment');try{await refreshAccount();}catch{await persistSettings({...settings,credits:Number(data.credits??settings.credits)});}setToast(data.addedCredits>0?`${Number(data.addedCredits).toLocaleString()} credits added successfully`:'Payment was already credited; balance refreshed.');resetPay();}else if(data.status==='failed'){localStorage.removeItem('wryte-pending-payment');setToast(data.message||'Payment failed. You can try again.');}else setToast(data.message||'Payment is still pending');}catch(e){if(e.status===404)localStorage.removeItem('wryte-pending-payment');setToast(e.message||'Unable to verify payment');}finally{setBillingBusy(false);}}
+  async function verifyPendingPayment(){const reference=localStorage.getItem('wryte-pending-payment');if(!reference){setToast('No pending payment found');return;}setBillingBusy(true);try{const data=await apiFetch('/api/billing/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reference})});if(data.status==='succeeded'){localStorage.removeItem('wryte-pending-payment');try{await refreshAccount();}catch{await persistSettings({...settings,credits:Number(data.credits??settings.credits)});}setFormError('');setToast(data.addedCredits>0?`${Number(data.addedCredits).toLocaleString()} credits added successfully`:'Payment was already credited; balance refreshed.');resetPay();}else if(data.status==='failed'){localStorage.removeItem('wryte-pending-payment');setToast(data.message||'Payment failed. You can try again.');}else setToast(data.message||'Payment is still pending');}catch(e){if(e.status===404)localStorage.removeItem('wryte-pending-payment');setToast(e.message||'Unable to verify payment');}finally{setBillingBusy(false);}}
   async function connectBlogger(u=firebaseUser){try{const data=await apiFetch('/api/connect/blogger/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({returnUrl:Capacitor.isNativePlatform()?'ai.wryte.app://auth-callback':window.location.origin})},u);if(Capacitor.isNativePlatform())await Browser.open({url:data.url});else window.location.href=data.url;return true;}catch(e){setToast(e.message||'Unable to connect Blogger');return false;}}
-  async function generateFeaturedImage(){if(!response){setToast('Generate an article first');return;}setModal('');setLoading(true);setLoadingLabel('Creating featured image');try{const data=await apiFetch('/api/image',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({projectId:response.id,title:response.title,niche:response.niche,style:response.brief?.style,details:response.brief?.additional})});const p={...response,featuredImage:data.dataUrl,updatedAt:now()};setResponse(p);setActive(p);await saveProject(p);if(data.credits!==undefined)await persistSettings({...settings,credits:data.credits});setToast('Featured image created');}catch(e){setToast(e.message||'Image generation failed');if(e.status===402){setModal('credits');setPayStep('pick');try{await refreshAccount();}catch{}}}finally{setLoading(false);}}
+  async function generateFeaturedImage(){if(!response){setToast('Generate an article first');return;}setModal('');setLoading(true);setLoadingLabel('Creating featured image');try{const data=await apiFetch('/api/image',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({projectId:response.id,title:response.title,niche:response.niche,style:response.brief?.style,details:response.brief?.additional})});const p={...response,featuredImage:data.dataUrl,updatedAt:now()};setResponse(p);setActive(p);await saveProject(p);if(data.credits!==undefined)await persistSettings({...settings,credits:data.credits});setToast('Featured image created');}catch(e){if(e.status===402){setToast('You do not have enough credits for a featured image. Add credits to continue.');setModal('credits');setPayStep('pick');try{await refreshAccount();}catch{}}else setToast(e.message||'Image generation failed');}finally{setLoading(false);}}
   async function saveDriveFolder(){try{const data=await apiFetch('/api/drive/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({folderId:settings.driveFolderId||''})});setSettings(v=>({...v,driveFolderId:data.folderId||'',driveConnected:Boolean(data.connected)}));await persistSettings({...settings,driveFolderId:data.folderId||'',driveConnected:Boolean(data.connected)});setModal('');setToast(data.configured?`Drive folder connected${data.folderName?`: ${data.folderName}`:''}. Published articles will also be saved as TXT files.`:'Drive TXT export disabled');}catch(e){setToast(e.message||'Unable to save Google Drive settings');}}
   async function loadDriveFiles(){
     if(!user||!settings.driveFolderId){setDriveFiles([]);return;}
@@ -358,7 +426,24 @@ function App(){
 function Welcome({onStart}){return <div className="welcome-page"><div className="welcome-nav"><Logo/><span className="tiny-label">YOUR WRITING WORKSPACE</span></div><div className="welcome-content"><div className="welcome-copy"><div className="welcome-pill"><span className="live-dot"/> YOUR IDEAS, WRITTEN BETTER</div><h1>Write with purpose.<br/><span>Publish with confidence.</span></h1><p>From a rough idea to a polished, search-ready article. Wyticle AI helps you write in your own voice, refine every detail, and publish when you're ready.</p><button className="primary-btn start-btn" onClick={onStart}>Start writing <ArrowRight size={17}/></button><div className="welcome-proof"><span><CheckCircle2 size={15}/> Two free article generations</span><span><CheckCircle2 size={15}/> Blogger publishing</span></div></div><div className="welcome-art" aria-label="Animated writing workspace illustration"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="art-glow"/><div className="floating-note note-one"><span className="note-dot"/> SEO-ready structure</div><div className="floating-note note-two"><Sparkles size={14}/> Natural voice</div><div className="paper-card"><div className="paper-top"><div className="mini-brand">W.</div><div className="paper-lines"><i/><i/></div><MoreHorizontal size={15}/></div><div className="paper-title"><i/><i/><i/></div><div className="paper-image"><div className="image-sun"/><div className="image-hill hill-a"/><div className="image-hill hill-b"/></div><div className="paper-lines body-lines"><i/><i/><i/><i/><i/></div><div className="paper-footer"><span><Check size={12}/> Ready to publish</span><span className="footer-pill"/></div></div><div className="floating-check"><Check size={18}/></div><div className="sparkle sparkle-a">✳</div><div className="sparkle sparkle-b">✧</div></div></div><div className="welcome-footer"><span>MADE FOR PEOPLE WHO CARE ABOUT THEIR WORDS</span><span>WYTICLE AI · WRITE BETTER</span></div></div>}
 function Logo(){return <div className="logo-lockup"><div className="brand-mark"><PenLine size={18}/><Sparkles size={9} className="mark-spark"/></div><span>Wyticle<span className="logo-light"> AI</span></span></div>}
 function GoogleG(){return <span className="google-g">G</span>}
-function friendlyAuthError(error){const code=error?.code||'';const msg=String(error?.message||'');if(msg.includes('28444')||/developer console is not set up/i.test(msg))return 'Google sign-in is not set up for this APK yet. Add this APK\'s SHA-1 and SHA-256 in Firebase, download a fresh google-services.json, and rebuild.';if(code.includes('network'))return 'Google sign-in could not connect. Check your internet and try again.';if(code.includes('popup-closed')||code.includes('cancelled'))return 'Sign-in was cancelled. You can try again whenever you are ready.';if(code.includes('unauthorized-domain'))return 'This website is not yet approved for Firebase sign-in. Add its domain in Firebase Authentication settings.';if(code.includes('developer_error')||code.includes('10'))return 'Google sign-in needs the Android app SHA-1/SHA-256 fingerprints and matching OAuth setup in Firebase.';return error?.message||'Unable to sign in right now. Please try again.';}
+function isEmbeddedBrowser(){const ua=navigator.userAgent||'';return /FBAN|FBAV|Instagram|Line\/|MicroMessenger|Twitter|Snapchat|; wv\)|GSA\//i.test(ua);}
+function isStandalonePwa(){try{return Boolean(window.matchMedia?.('(display-mode: standalone)')?.matches||window.navigator.standalone);}catch{return false;}}
+function friendlyAuthError(error){
+  const code=String(error?.code||'');const msg=String(error?.message||'');const text=`${code} ${msg}`;
+  if(msg.includes('28444')||/developer console is not set up/i.test(msg))return 'Google sign-in is not set up for this APK yet. Add this APK\'s SHA-1 and SHA-256 in Firebase, download a fresh google-services.json, and rebuild.';
+  if(/popup-closed|cancelled|canceled|user.?cancel|12501|\b-5\b/i.test(text))return 'Sign-in was cancelled. You can try again whenever you are ready.';
+  if(/network|timeout|\b7\b.*network|unavailable/i.test(text)&&!/play.?services/i.test(text))return 'Google sign-in could not connect. Check your internet and try again.';
+  if(/play.?services|SERVICE_MISSING|SERVICE_DISABLED|SERVICE_VERSION_UPDATE_REQUIRED/i.test(text))return 'Google Play services is missing or out of date on this device. Update it from the Play Store and try again.';
+  if(code.includes('unauthorized-domain'))return 'This website is not yet approved for Firebase sign-in. Add its domain in Firebase Authentication settings.';
+  if(code.includes('operation-not-allowed'))return 'Google sign-in is not enabled for this app. Enable the Google provider in Firebase Authentication.';
+  if(code.includes('account-exists-with-different-credential'))return 'An account with this email already exists using a different sign-in method.';
+  if(code.includes('user-disabled'))return 'This account has been disabled. Contact support if you think this is a mistake.';
+  if(code.includes('too-many-requests'))return 'Too many sign-in attempts. Please wait a few minutes and try again.';
+  if(code.includes('web-storage-unsupported')||code.includes('operation-not-supported'))return 'Your browser is blocking storage needed for sign-in. Allow cookies/site data for this site, or try another browser.';
+  if(/developer_error|DEVELOPER_ERROR|\b10\b/.test(text))return 'Google sign-in needs the Android app SHA-1/SHA-256 fingerprints and matching OAuth setup in Firebase.';
+  if(/invalid-api-key|api-key-not-valid/i.test(text))return 'The Firebase web configuration is invalid. Check the API key in your Firebase settings.';
+  return error?.message&&!/^Firebase: /.test(error.message)?error.message:'Unable to sign in right now. Please try again.';
+}
 function stripHtml(html=''){const doc=new DOMParser().parseFromString(String(html),'text/html');return (doc.body.textContent||'').trim();}
 // Allow-list sanitizer for AI-generated / user-edited article HTML (DOMParser documents are inert: no scripts or onerror handlers run).
 const SAFE_TAGS=new Set(['A','P','BR','H1','H2','H3','H4','H5','H6','UL','OL','LI','STRONG','B','EM','I','U','S','BLOCKQUOTE','PRE','CODE','HR','IMG','FIGURE','FIGCAPTION','TABLE','THEAD','TBODY','TR','TH','TD','SPAN','DIV','SECTION','ARTICLE','IFRAME','SUP','SUB','MARK']);

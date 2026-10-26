@@ -30,12 +30,12 @@ npm run check
 npm start
 ```
 
-Configure the required values in `server/.env`. `OPENAI_MODEL` explicitly selects the article-writing model at backend startup; change that environment variable to switch models without editing application code, then restart/redeploy the backend. The code fallback is `gpt-4.1-mini` if `OPENAI_MODEL` is omitted. The image model is independently controlled by `OPENAI_IMAGE_MODEL`.
+Configure the required values in `server/.env`. Gemini (Google AI Studio) is the only AI provider. `GEMINI_MODEL` selects the writing model and `GEMINI_FALLBACK_MODELS` lists models tried in order if it is overloaded, rate-limited or unavailable; change them without editing code, then restart/redeploy the backend. Live research (Google Search grounding) is one extra request per article/revision, and every source shown to users comes from what Search actually returned. Featured images use `GEMINI_IMAGE_MODEL` (with `GEMINI_IMAGE_FALLBACK_MODELS`). Provider quota, key and outage problems are shown to users as a short, neutral message (never provider text) and are never charged; HTTP 402 is reserved for the user's own credit balance.
 
 - Firebase Admin service-account JSON.
 - Supabase URL and service-role key.
 - One encryption key for stored OAuth credentials.
-- OpenAI API key.
+- Gemini API key (Google AI Studio).
 - Google OAuth client ID and secret.
 - Public app URL, public API URL, and allowed frontend origin.
 - Flutterwave v4 client ID and secret only if enabling paid credit purchases.
@@ -71,7 +71,7 @@ Wyticle AI currently publishes to Blogger. WordPress connection and publishing f
 - The backend verifies Firebase ID tokens; it never trusts a client-supplied user ID or balance.
 - AI operations reserve credits atomically, settle against actual model tokens/search calls, and refund unused reservations or failed operations.
 - AI image generation is separately priced (`IMAGE_CREDIT_COST`); uploading an image from the device is free.
-- Credits are cost-based: every paid action reserves credits before the provider call and settles against reported token/search usage afterward; unused units are refunded. The reserve uses a conservative input allowance plus output/search caps. When you change `OPENAI_MODEL`, update per-token price variables. The two initial free article entitlements are atomic. Free follow-up reservations on trial articles are capped atomically by `TRIAL_FOLLOWUP_LIMIT`; failed requests release their reservation and restore the follow-up slot. For an existing database, run `server/sql/pricing-protection-migration.sql` and `server/sql/credit-payment-hardening-migration.sql`.
+- Credits are cost-based: every paid action reserves credits before the provider call and settles against reported token/search usage afterward; unused units are refunded. The reserve uses a conservative input allowance plus output/search caps. When you change `GEMINI_MODEL`, update `GEMINI_INPUT_USD_PER_M` / `GEMINI_OUTPUT_USD_PER_M` (thinking tokens are billed as output). The two initial free article entitlements are atomic. Free follow-up reservations on trial articles are capped atomically by `TRIAL_FOLLOWUP_LIMIT`; failed requests release their reservation and restore the follow-up slot. For an existing database, run `server/sql/pricing-protection-migration.sql` and `server/sql/credit-payment-hardening-migration.sql`.
 - Checkout uses the Flutterwave **v4** card flow in NGN: create customer → encrypt card with `FLW_V4_ENCRYPTION_KEY` → create payment method → create charge → submit PIN (`/api/billing/authorize`) → submit OTP or complete 3-D Secure → verify. Credits are only granted after the server fetches the charge from Flutterwave and checks exact reference, transaction ID, currency and amount; database crediting is atomic and duplicate-safe. Charge/authorization requests use stable idempotency keys. Packs are priced in USD (`packs` in `server/index.js`) and charged at `USD_NGN_RATE`. Card data passes through your server in memory only and must never be logged; review PCI-DSS obligations before launch. Run `server/sql/billing-card-migration.sql` and `server/sql/credit-payment-hardening-migration.sql` for existing databases.
 - Payment return does not itself grant credits. The authenticated backend retrieves the v4 charge and checks reference, amount, currency and terminal success before the atomic credit RPC can add value. Users can retry verification if a payment is still pending; an optional webhook (`/api/billing/webhook`) also credits completed payments.
 
@@ -125,9 +125,10 @@ Before public launch:
 ### Frontend build variables (`.env`)
 
 - `VITE_FIREBASE_CONFIG` — required for browser/PWA Google sign-in; JSON for the Firebase **Web app**. The APK's native sign-in uses the root `google-services.json` (mirrored under `android-setup/`) instead.
+- `VITE_FIREBASE_AUTH_DOMAIN` — optional. Use your own domain (proxy `/__/auth/` to `<project>.firebaseapp.com`) so redirect sign-in works in Safari/Chrome builds that block third-party storage.
 - `VITE_API_BASE_URL` — required for every live backend operation in browser and APK. Use the public HTTPS API URL in production and before building the APK; `localhost` is only for local browser development.
 
-Never put private keys, OAuth client secrets, Supabase service-role keys, or OpenAI keys in a `VITE_` variable because frontend values are public.
+Never put private keys, OAuth client secrets, Supabase service-role keys, or the Gemini API key in a `VITE_` variable because frontend values are public.
 
 ### Backend required variables (`server/.env`)
 
@@ -135,8 +136,8 @@ Never put private keys, OAuth client secrets, Supabase service-role keys, or Ope
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `TOKEN_ENCRYPTION_KEY` — base64-encoded 32-byte key for encrypted OAuth credentials.
-- `OPENAI_API_KEY`
-- `OPENAI_MODEL` — article-writing model ID, for example `gpt-4.1-mini`; this environment variable controls the model used by generation, revisions, diagnosis and fixes.
+- `GEMINI_API_KEY` — Google AI Studio key (`GOOGLE_API_KEY` is also accepted).
+- `GEMINI_MODEL` — writing model (default `gemini-3.5-flash-lite`); used by generation, revisions, diagnosis and fixes. `GEMINI_FALLBACK_MODELS` — comma-separated fallbacks.
 - `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` — Google OAuth web client for Blogger and Drive, separate from the Firebase Web app configuration.
 - `APP_URL` — public frontend origin used by OAuth callbacks.
 - `API_PUBLIC_URL` — public HTTPS backend origin used in Google OAuth redirect URI.
@@ -147,8 +148,9 @@ Never put private keys, OAuth client secrets, Supabase service-role keys, or Ope
 - `PORT` — default `8787`.
 - `MAX_OUTPUT_TOKENS` — default `9000`.
 - `ENABLE_WEB_SEARCH` — default enabled; set `false` to disable research search calls.
-- `OPENAI_IMAGE_MODEL` — default `gpt-image-1`.
-- `CREDIT_MARKUP` (5), `CREDIT_VALUE_USD` (0.002), `OPENAI_INPUT_USD_PER_M`, `OPENAI_OUTPUT_USD_PER_M`, `SEARCH_USD_PER_CALL`, `IMAGE_USD_COST`, `MAX_SEARCH_CALLS` (3), `TRIAL_FOLLOWUP_LIMIT` (4), `USD_NGN_RATE`, `IMAGE_CREDIT_COST` (optional fixed override).
+- `GEMINI_IMAGE_MODEL` — default `gemini-3.1-flash-image-preview`; `GEMINI_IMAGE_FALLBACK_MODELS` — default `gemini-2.5-flash-image`.
+- `GEMINI_THINKING_LEVEL` — optional (`minimal`/`low`/`medium`/`high`) for deeper reasoning at higher cost.
+- `CREDIT_MARKUP` (5), `CREDIT_VALUE_USD` (0.002), `GEMINI_INPUT_USD_PER_M` (0.30), `GEMINI_OUTPUT_USD_PER_M` (2.50), `SEARCH_USD_PER_CALL` (0.035), `IMAGE_USD_COST` (0.07), `TRIAL_FOLLOWUP_LIMIT` (4), `USD_NGN_RATE`, `IMAGE_CREDIT_COST` (optional fixed override).
 - `SCHEDULE_MAX_ACTIVE_PER_USER` — default `10`.
 - `SCHEDULE_MAX_ACTIVE_GLOBAL` — default `500`.
 - `SCHEDULE_MAX_DAYS` — default `90`.

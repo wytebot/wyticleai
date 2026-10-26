@@ -13,8 +13,9 @@
 | `SUPABASE_URL` | Supabase → Project Settings → API → Project URL. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Same page → `service_role` key (secret, server only). Then run `server/sql/schema.sql` in the SQL editor. |
 | `TOKEN_ENCRYPTION_KEY` | Run `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`. Never change it after users connect sites. |
-| `OPENAI_API_KEY` | platform.openai.com → API keys (needs billing; gpt-image-1 may need org verification). |
-| `OPENAI_MODEL` | Optional, default `gpt-4.1-mini`. |
+| `GEMINI_API_KEY` | aistudio.google.com/apikey (Google AI Studio). Used for writing, live research and featured images. |
+| `GEMINI_MODEL` / `GEMINI_FALLBACK_MODELS` | Optional. Defaults `gemini-3.5-flash-lite` and `gemini-3.8-flash,gemini-3.6-flash`. |
+| `GEMINI_IMAGE_MODEL` / `GEMINI_IMAGE_FALLBACK_MODELS` | Optional. Defaults `gemini-3.1-flash-image-preview` and `gemini-2.5-flash-image`. |
 | `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` | Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID → **Web application**. Authorized redirect URI: `<API_PUBLIC_URL>/api/connect/blogger/callback`. Enable **Blogger API** and **Google Drive API**; add scopes `blogger` and `drive` on the consent screen. |
 | `APP_URL` | Public URL of the web frontend. |
 | `API_PUBLIC_URL` | Public HTTPS URL of this backend (same as VITE_API_BASE_URL). |
@@ -26,8 +27,8 @@
 | `FLW_V4_WEBHOOK_SECRET_HASH` | Optional. Any secret string you also enter as the secret hash under Settings → Webhooks; webhook URL is `<API_PUBLIC_URL>/api/billing/webhook`. |
 | `SCHEDULE_WORKER_SECRET` | Any long random string (`openssl rand -hex 32`); only needed if an external cron pings `/api/internal/scheduled-worker`. |
 | `NODE_ENV`, `TRUST_PROXY_HOPS`, `PORT` | `production`, `1`, host-provided. |
-| Pricing and usage limits | Hard-coded in `server/index.js` under `PRICING_CONFIG`: input/output token estimates, image cost, credit markup/value, max search calls, trial follow-up limit, and input token estimate. Edit these source constants when you intentionally change pricing or limits; they do not need Vercel environment variables. |
-| Other tuning | `MAX_OUTPUT_TOKENS`, `ENABLE_WEB_SEARCH`, `OPENAI_IMAGE_MODEL`, `SCHEDULE_MAX_*`. |
+| Pricing and usage limits | `PRICING_CONFIG` in `server/index.js` has defaults for Gemini token prices, research and image cost, credit markup/value and trial follow-up limit. Override with `GEMINI_INPUT_USD_PER_M`, `GEMINI_OUTPUT_USD_PER_M`, `SEARCH_USD_PER_CALL`, `IMAGE_USD_COST`, `CREDIT_MARKUP`, `CREDIT_VALUE_USD`, `TRIAL_FOLLOWUP_LIMIT` when you change model or Google changes prices. |
+| Other tuning | `MAX_OUTPUT_TOKENS`, `ENABLE_WEB_SEARCH`, `GEMINI_THINKING_LEVEL`, `SCHEDULE_MAX_*`. |
 
 ## Android-only (not env vars)
 1. Firebase → Add Android app, package `app.wyticleai.vercel` → download `google-services.json` into `android-setup/`.
