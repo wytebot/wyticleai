@@ -1,0 +1,16 @@
+import { TwaGenerator, TwaManifest, ConsoleLog } from '@bubblewrap/core';
+import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
+const out = process.env.WB_OUT || `${process.cwd()}/.wybuild-out`;
+const manifestPath = `${out}/twa-manifest.json`;
+const manifest = await TwaManifest.fromFile(manifestPath);
+const error = manifest.validate();
+if (error) throw new Error(`Invalid TWA manifest: ${error}`);
+await fs.rm(`${out}/project`, { recursive: true, force: true });
+await fs.mkdir(`${out}/project`, { recursive: true });
+const generator = new TwaGenerator();
+await generator.createTwaProject(`${out}/project`, manifest, new ConsoleLog('WyBuild TWA'));
+const bytes = await fs.readFile(manifestPath);
+await fs.writeFile(`${out}/project/twa-manifest.json`, bytes);
+await fs.writeFile(`${out}/project/manifest-checksum.txt`, crypto.createHash('sha1').update(bytes).digest('hex'));
+console.log(`WYBUILD_PROJECT_READY=true`);
