@@ -26,7 +26,7 @@
 | `FLW_V4_WEBHOOK_SECRET_HASH` | Optional. Any secret string you also enter as the secret hash under Settings → Webhooks; webhook URL is `<API_PUBLIC_URL>/api/billing/webhook`. |
 | `SCHEDULE_WORKER_SECRET` | Any long random string (`openssl rand -hex 32`); only needed if an external cron pings `/api/internal/scheduled-worker`. |
 | `NODE_ENV`, `TRUST_PROXY_HOPS`, `PORT` | `production`, `1`, host-provided. |
-| Pricing (all optional) | `CREDIT_MARKUP` (default 5), `CREDIT_VALUE_USD` (0.002), `OPENAI_INPUT_USD_PER_M` (0.40), `OPENAI_OUTPUT_USD_PER_M` (1.60), `SEARCH_USD_PER_CALL`, `IMAGE_USD_COST` (0.063), `MAX_SEARCH_CALLS` (3), `MAX_INPUT_TOKENS_ESTIMATE` (35000), `TRIAL_FOLLOWUP_LIMIT` (4). Copy per-token prices from platform.openai.com/docs/pricing for your model. |
+| Pricing and usage limits | Hard-coded in `server/index.js` under `PRICING_CONFIG`: input/output token estimates, image cost, credit markup/value, max search calls, trial follow-up limit, and input token estimate. Edit these source constants when you intentionally change pricing or limits; they do not need Vercel environment variables. |
 | Other tuning | `MAX_OUTPUT_TOKENS`, `ENABLE_WEB_SEARCH`, `OPENAI_IMAGE_MODEL`, `SCHEDULE_MAX_*`. |
 
 ## Android-only (not env vars)

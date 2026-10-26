@@ -12,7 +12,20 @@
           "package_name": "app.wyticleai.vercel"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "589252246114-kihucp39ijdj1jjk50i2cjhsdjk5ui86.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "app.wyticleai.vercel",
+            "certificate_hash": "156d9482f1eaf49751eb566477388b8e3f3f58ac"
+          }
+        },
+        {
+          "client_id": "589252246114-pdlhe9mbu5u80p554039bdp4pp1e3ada.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyCvaBZBk49cGmTXAGs93XJ4ARfIAH08ICk"
@@ -20,7 +33,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "589252246114-pdlhe9mbu5u80p554039bdp4pp1e3ada.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

@@ -301,22 +301,33 @@ app.post('/api/internal/scheduled-worker',async(req,res)=>{const secret=String(p
 // AI costs are estimated from observed tokens and current rate configuration. Credits are internal units;
 // a wallet RPC atomically spends credits or consumes one of the two initial-article entitlements.
 // ---- Cost-based pricing: credits are derived from real OpenAI costs, so changing model/prices never silently loses money ----
+// Hard-coded pricing and usage protections. Update these constants in source when pricing changes.
 const envNum=(k,d)=>{const v=Number(process.env[k]);return Number.isFinite(v)&&v>0?v:d;};
-function pricing(){const inPerM=envNum('OPENAI_INPUT_USD_PER_M',0.40);return {inPerM,outPerM:envNum('OPENAI_OUTPUT_USD_PER_M',1.60),
-  search:envNum('SEARCH_USD_PER_CALL',0.01+8000*inPerM/1e6), // web_search tool: $10/1k calls + a fixed 8,000-token content block per call for gpt-4.1-mini
-  image:envNum('IMAGE_USD_COST',0.063), // gpt-image-1, medium, 1536x1024
-  markup:envNum('CREDIT_MARKUP',5), // customer pays this multiple of your API cost
-  creditUsd:envNum('CREDIT_VALUE_USD',0.002)}; // face value of one credit in USD
+const PRICING_CONFIG = Object.freeze({
+  inputUsdPerMillion: 0.40,
+  outputUsdPerMillion: 1.60,
+  imageUsdCost: 0.063,
+  creditMarkup: 5,
+  creditValueUsd: 0.002,
+  maxSearchCalls: 3,
+  trialFollowupLimit: 4,
+  maxInputTokensEstimate: 35000
+});
+function pricing(){const inPerM=PRICING_CONFIG.inputUsdPerMillion;return {inPerM,outPerM:PRICING_CONFIG.outputUsdPerMillion,
+  search:0.01+8000*inPerM/1e6, // estimated web search cost per call
+  image:PRICING_CONFIG.imageUsdCost,
+  markup:PRICING_CONFIG.creditMarkup,
+  creditUsd:PRICING_CONFIG.creditValueUsd};
 }
 const costUsd=({input=0,output=0,searches=0})=>{const p=pricing();return input/1e6*p.inPerM+output/1e6*p.outPerM+searches*p.search;};
 const creditsForUsd=(usd)=>{const p=pricing();return Math.max(1,Math.ceil(usd*p.markup/p.creditUsd));};
 const imageCredits=()=>Number(process.env.IMAGE_CREDIT_COST)||creditsForUsd(pricing().image);
-const MAX_SEARCH_CALLS=()=>Math.max(0,Math.floor(envNum('MAX_SEARCH_CALLS',3)));
+const MAX_SEARCH_CALLS=()=>PRICING_CONFIG.maxSearchCalls;
 const maxOutTokens=(action)=>action==='diagnose'?1500:Math.min(12000,envNum('MAX_OUTPUT_TOKENS',9000));
 const searchLimit=(action)=>action==='diagnose'||process.env.ENABLE_WEB_SEARCH==='false'?0:(action==='initial'?MAX_SEARCH_CALLS():Math.min(2,MAX_SEARCH_CALLS()));
 // The hold is the worst case the request can cost (token caps + search cap), so a generation can never cost more than was reserved.
 function estimateCredits({action,brief={}}){if(action==='image')return imageCredits();// Reserve against a conservative input allowance plus the hard output/search caps. Settlement refunds unused units.
-const inputGuess=Math.max(35000,Number(envNum('MAX_INPUT_TOKENS_ESTIMATE',35000)));return creditsForUsd(costUsd({input:inputGuess,output:maxOutTokens(action),searches:searchLimit(action)}));}
+const inputGuess=PRICING_CONFIG.maxInputTokensEstimate;return creditsForUsd(costUsd({input:inputGuess,output:maxOutTokens(action),searches:searchLimit(action)}));}
 async function debitBefore(uid,{action,projectId,brief}){const units=estimateCredits({action,brief});const {data,error}=await supabase.rpc('wryte_reserve_usage',{p_user_id:uid,p_action:action,p_project_id:projectId||null,p_estimated_credits:units});if(error)throw new Error('Credit service unavailable. Try again later.');if(!data?.ok) {const e=new Error(data?.error||'Not enough credits. Purchase a credit pack to continue.');e.status=402;throw e;}return {reservationId:data.reservation_id,units:data.reserved_credits||0,free:data.free||false};}
 async function settleUsage(reservationId,uid,usage,action,projectId){const actual=creditsForUsd(costUsd({input:Number(usage?.inputTokens||0),output:Number(usage?.outputTokens||0),searches:Number(usage?.searchCalls||0)}));const {data,error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservationId,p_user_id:uid,p_actual_credits:actual,p_usage:usage||{},p_action:action,p_project_id:projectId||null});if(error||data?.ok===false)throw new Error('Could not settle usage. Contact support before retrying.');return data;}
 app.get('/api/credits',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({credits:w.credits||0,freeGenerationsRemaining:Math.max(0,2-(w.free_generations_used||0)),unit:'credits'});}catch(e){res.status(500).json({error:'Unable to load credit balance.'});}});
@@ -334,7 +345,7 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
     // Free trial follow-ups are reserved atomically in PostgreSQL. A failed request releases the slot.
     const trialIds=wallet.trial_project_ids||[];const trialProject=trialIds.includes(targetProject);
     if(action!=='initial'&&action!=='document'&&trialProject){
-      const {data:trial,error:trialError}=await supabase.rpc('wryte_reserve_trial_followup',{p_user_id:req.user.uid,p_project_id:targetProject,p_action:action,p_limit:Math.floor(envNum('TRIAL_FOLLOWUP_LIMIT',4))});
+      const {data:trial,error:trialError}=await supabase.rpc('wryte_reserve_trial_followup',{p_user_id:req.user.uid,p_project_id:targetProject,p_action:action,p_limit:PRICING_CONFIG.trialFollowupLimit});
       if(trialError)throw new Error('Credit service unavailable. Try again later.');
       if(trial?.ok)reservation={free:true,reservationId:trial.reservation_id,units:0};
       else reservation=await debitBefore(req.user.uid,{action,projectId:targetProject,brief});
