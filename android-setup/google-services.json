@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "589252246114",
+    "project_id": "wryteai-62356",
+    "storage_bucket": "wryteai-62356.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:589252246114:android:94dc642dee94a4cb0def3b",
+        "android_client_info": {
+          "package_name": "app.wyticleai.vercel"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCvaBZBk49cGmTXAGs93XJ4ARfIAH08ICk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

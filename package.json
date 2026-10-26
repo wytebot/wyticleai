@@ -1,0 +1,39 @@
+{
+  "name": "wyticle-ai",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "cap:sync": "npm run build && cap sync",
+    "android": "cap open android",
+    "server": "node server/index.js",
+    "cap:assets": "capacitor-assets generate --android --ios",
+    "cap:firebase-setup": "node scripts/setup-android-firebase.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.4.3",
+    "@capacitor/core": "^7.4.3",
+    "@capacitor/ios": "^7.4.3",
+    "firebase": "^12.4.0",
+    "idb": "^8.0.3",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "@capacitor/app": "^7.0.1",
+    "@capacitor/browser": "^7.0.1",
+    "@capacitor-firebase/authentication": "^7.2.0",
+    "@capacitor/filesystem": "^7.1.4",
+    "@capacitor/share": "^7.0.2",
+    "docx": "^9.5.1",
+    "jspdf": "^3.0.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.4.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "vite": "^6.3.5",
+    "@capacitor/assets": "^3.0.5"
+  }
+}

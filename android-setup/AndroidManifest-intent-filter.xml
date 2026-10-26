@@ -1,0 +1,7 @@
+<!-- Paste this intent-filter inside the MainActivity <activity> element after `npx cap add android`. -->
+<intent-filter>
+  <action android:name="android.intent.action.VIEW" />
+  <category android:name="android.intent.category.DEFAULT" />
+  <category android:name="android.intent.category.BROWSABLE" />
+  <data android:scheme="ai.wryte.app" android:host="auth-callback" />
+</intent-filter>
