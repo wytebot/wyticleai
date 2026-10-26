@@ -41,6 +41,31 @@ try {
   } else if(process.env.GOOGLE_APPLICATION_CREDENTIALS){ admin.initializeApp({credential:admin.credential.applicationDefault()}); firebaseReady=true; }
 } catch(e){ console.error('Firebase Admin initialization failed:',e.message); }
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY ? createClient(process.env.SUPABASE_URL,process.env.SUPABASE_SERVICE_ROLE_KEY,{auth:{persistSession:false,autoRefreshToken:false}}) : null;
+// Firestore is a fallback store for push-device registrations only; it does not replace Supabase for accounts, credits, or posts.
+const firestore = firebaseReady ? admin.firestore() : null;
+const pushCollection = () => firestore.collection('wyticlePushDevices');
+const pushDocId = token => crypto.createHash('sha256').update(String(token)).digest('hex');
+async function listPushDevices(uid){
+  if(supabase){
+    try { const {data,error}=await supabase.from('wryte_push_devices').select('token').eq('user_id',String(uid)).eq('active',true).limit(20); if(error)throw error; return data||[]; }
+    catch(e){ console.warn('Supabase push registry unavailable; using Firestore fallback:',e.message); }
+  }
+  if(!firestore) return [];
+  const snap=await pushCollection().where('userId','==',String(uid)).limit(100).get();
+  return snap.docs.filter(d=>d.get('active')===true).slice(0,20).map(d=>({token:d.get('token'),docId:d.id})).filter(d=>d.token);
+}
+async function savePushDevice(uid,token,platform){
+  let supabaseError=null;
+  if(supabase){try{const {error}=await supabase.from('wryte_push_devices').upsert({user_id:String(uid),token,platform,active:true,updated_at:new Date().toISOString()},{onConflict:'token'});if(!error)return 'supabase';supabaseError=error;}catch(e){supabaseError=e;}}
+  if(firestore){await pushCollection().doc(pushDocId(token)).set({userId:String(uid),token,platform,active:true,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});return 'firestore';}
+  throw supabaseError||new Error('No push-device registry is configured.');
+}
+async function deactivatePushDevice(uid,token){
+  let supabaseError=null;
+  if(supabase){try{const {error}=await supabase.from('wryte_push_devices').update({active:false,updated_at:new Date().toISOString()}).eq('user_id',String(uid)).eq('token',token);if(!error)return;supabaseError=error;}catch(e){supabaseError=e;}}
+  if(firestore){const ref=pushCollection().doc(pushDocId(token));const doc=await ref.get();if(doc.exists&&doc.get('userId')===String(uid))await ref.set({active:false,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});return;}
+  if(supabaseError)throw supabaseError;throw new Error('No push-device registry is configured.');
+}
 const OPENAI_API_KEY=process.env.OPENAI_API_KEY;
 const OPENAI_MODEL=process.env.OPENAI_MODEL||'gpt-4.1-mini';
 const APP_URL=(process.env.APP_URL||'http://localhost:5173').replace(/\/$/,'');
@@ -70,13 +95,12 @@ async function auth(req,res,next){
 function safeEqual(a,b){const x=Buffer.from(String(a)),y=Buffer.from(String(b));return x.length===y.length&&crypto.timingSafeEqual(x,y);} // compares BYTE lengths; timingSafeEqual throws on unequal buffers
 function dbRequired(req,res,next){if(!supabase)return res.status(503).json({error:'Account database is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'});next();}
 async function sendPushToUser(uid,{title,body,type,projectId}={}){
-  if(!firebaseReady||!supabase||!uid)return;
+  if(!firebaseReady||!uid)return;
   try{
-    const {data:devices,error}=await supabase.from('wryte_push_devices').select('token').eq('user_id',String(uid)).eq('active',true).limit(20);
-    if(error)throw error;
-    for(const device of devices||[]){
+    const devices=await listPushDevices(uid);
+    for(const device of devices){
       try{await admin.messaging().send({token:device.token,notification:{title:String(title||'Wyticle AI').slice(0,120),body:String(body||'Your update is ready.').slice(0,240)},data:{type:String(type||'update'),...(projectId?{projectId:String(projectId)}:{})},android:{priority:'high',notification:{channelId:'wyticle-updates',sound:'default'}},apns:{payload:{aps:{sound:'default'}}}});}
-      catch(e){if(['messaging/registration-token-not-registered','messaging/invalid-registration-token'].includes(e.code)){await supabase.from('wryte_push_devices').update({active:false,updated_at:new Date().toISOString()}).eq('token',device.token);}else console.warn('Push delivery failed:',e.code||e.message);}
+      catch(e){if(['messaging/registration-token-not-registered','messaging/invalid-registration-token'].includes(e.code)){try{await deactivatePushDevice(uid,device.token);}catch(cleanupError){console.warn('Could not deactivate invalid push token:',cleanupError.message);}}else console.warn('Push delivery failed:',e.code||e.message);}
     }
   }catch(e){console.warn('Push notification skipped:',e.message);}
 }
@@ -86,14 +110,14 @@ async function ensureWallet(uid){
   return data;
 }
 app.get('/health',(_req,res)=>res.json({ok:true,service:'wyticle-ai-api',authConfigured:firebaseReady,databaseConfigured:Boolean(supabase),aiConfigured:Boolean(OPENAI_API_KEY)}));
-app.post('/api/push/register',auth,dbRequired,async(req,res)=>{
+app.post('/api/push/register',auth,async(req,res)=>{
   const token=String(req.body?.token||'').trim();const platform=String(req.body?.platform||'unknown');
   if(token.length<40||token.length>4096||!/^[A-Za-z0-9_./:-]+$/.test(token))return res.status(400).json({error:'Invalid push registration token.'});
   if(!['android','ios'].includes(platform))return res.status(400).json({error:'Unsupported native push platform.'});
-  try{const {error}=await supabase.from('wryte_push_devices').upsert({user_id:req.user.uid,token,platform,active:true,updated_at:new Date().toISOString()},{onConflict:'token'});if(error)throw error;res.json({ok:true});}
-  catch(e){console.error('Push registration:',e.message);res.status(500).json({error:'Unable to register this device for notifications.'});}
+  try{const storage=await savePushDevice(req.user.uid,token,platform);res.json({ok:true,storage});}
+  catch(e){console.error('Push registration:',e.message);res.status(503).json({error:'Unable to register this device. Configure Supabase or Firebase Admin with Firestore enabled.'});}
 });
-app.delete('/api/push/register',auth,dbRequired,async(req,res)=>{const token=String(req.body?.token||'').trim();if(!token)return res.status(400).json({error:'Push token is required.'});try{const {error}=await supabase.from('wryte_push_devices').update({active:false,updated_at:new Date().toISOString()}).eq('user_id',req.user.uid).eq('token',token);if(error)throw error;res.json({ok:true});}catch(e){res.status(500).json({error:'Unable to unregister this device.'});}});
+app.delete('/api/push/register',auth,async(req,res)=>{const token=String(req.body?.token||'').trim();if(!token)return res.status(400).json({error:'Push token is required.'});try{await deactivatePushDevice(req.user.uid,token);res.json({ok:true});}catch(e){res.status(503).json({error:'Unable to unregister this device.'});}});
 
 app.get('/api/me',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({user:req.user,wallet:{credits:w.credits,freeGenerationsRemaining:Math.max(0,2-(w.free_generations_used||0))},connectedSites:await listSites(req.user.uid)});}catch(e){console.error(e);res.status(500).json({error:'Unable to load your account.'});}});
 function isPrivateAddress(a){if(net.isIPv6(a)){const l=a.toLowerCase();return l==='::1'||l==='::'||l.startsWith('fc')||l.startsWith('fd')||l.startsWith('fe8')||l.startsWith('fe9')||l.startsWith('fea')||l.startsWith('feb')||l.startsWith('::ffff:');}const [x,y]=a.split('.').map(Number);return x===0||x===10||x===127||(x===100&&y>=64&&y<=127)||(x===169&&y===254)||(x===172&&y>=16&&y<=31)||(x===192&&y===168)||x>=224;}

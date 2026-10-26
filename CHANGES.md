@@ -46,3 +46,9 @@ database functions and live Flutterwave/Blogger/OpenAI flows could not be exerci
 - Known limits left as-is: the Google OAuth scope is full `drive` (a narrower `drive.file` scope would be safer, but
   changing it forces all users to reconnect and breaks listing existing exports); if Flutterwave rejects customer
   creation because the email already exists, checkout fails until `flw_customer_id` is set manually.
+
+## Firestore fallback for native push registry
+- Push device registration now writes to Supabase first and falls back to Firestore collection `wyticlePushDevices` when Supabase is unavailable or the push registry operation fails.
+- Push delivery reads from Supabase first and falls back to Firestore if the Supabase lookup fails or Supabase is not configured.
+- Device unregister and invalid-token cleanup support both stores.
+- This fallback is limited to push-device registry storage; it does not replace Supabase for account, credit, article, or scheduled-post data.

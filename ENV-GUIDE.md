@@ -37,3 +37,9 @@
 
 ## Database
 Run `server/sql/pricing-protection-migration.sql` and `server/sql/billing-card-migration.sql` once for older databases. Also run `server/sql/credit-payment-hardening-migration.sql` to enable atomic free-follow-up reservations and strict duplicate-safe payment crediting, then `server/sql/payment-recovery-migration.sql` so a provider-confirmed payment is never left uncredited. Fresh databases should run the complete `server/sql/schema.sql`, which includes the current functions.
+
+### Native push notification storage fallback
+
+Push-device registrations use Supabase when available and automatically fall back to the Firebase project's **Cloud Firestore** collection `wyticlePushDevices` if the Supabase registry is missing or fails. This fallback is for push-device tokens only; user accounts, wallet/credits, article data, and scheduled posts still require the app's configured primary database.
+
+For Firestore fallback, enable **Cloud Firestore** in the same Firebase project used by Firebase Admin, and configure the backend service account using `FIREBASE_SERVICE_ACCOUNT_JSON` (or `GOOGLE_APPLICATION_CREDENTIALS`). The service account needs permission to read/write Firestore and send Firebase Cloud Messaging notifications. No client-side Firestore rules should be opened publicly; these writes are performed by the trusted backend. FCM delivery still requires a valid native device token and Android notification permission.
