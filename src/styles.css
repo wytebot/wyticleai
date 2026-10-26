@@ -78,3 +78,15 @@
 .schedule-pickers{display:grid;grid-template-columns:1fr auto auto;gap:8px}
 .schedule-pickers .picker-btn{width:auto}
 .schedule-pickers .picker-btn:first-child{width:100%}
+
+/* APK fullscreen safety: keep content clear of the physical top edge and gesture/status-bar area. */
+@media(max-width:760px){
+  .app-shell{min-height:100dvh;padding-top:max(12px,env(safe-area-inset-top));padding-bottom:env(safe-area-inset-bottom);}
+  .sidebar{top:max(12px,env(safe-area-inset-top));bottom:env(safe-area-inset-bottom);}
+  .overlay{padding-top:max(20px,calc(env(safe-area-inset-top) + 12px));padding-bottom:max(20px,calc(env(safe-area-inset-bottom) + 12px));}
+  .create-sheet,.picker-sheet{max-height:calc(100dvh - max(24px,env(safe-area-inset-top)) - env(safe-area-inset-bottom));}
+}
+.blogger-site-picker{display:grid;gap:8px;margin:16px 0;padding:14px;border:1px solid #303030;border-radius:15px;background:#0c0c0c}
+.blogger-site-picker label{font-size:12px;font-weight:700;color:#ddd}
+.blogger-site-picker select{width:100%;min-width:0;background:#171717;color:#f4f4f4;border:1px solid #393939;border-radius:11px;padding:12px 36px 12px 12px;line-height:1.4}
+.blogger-site-picker small{font-size:11px;line-height:1.5;color:#999}
