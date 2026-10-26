@@ -2,13 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 const root = process.cwd();
 const android = path.join(root, 'android');
-const source = path.join(root, 'android-setup', 'google-services.json');
+const rootSource = path.join(root, 'google-services.json');
+const setupSource = path.join(root, 'android-setup', 'google-services.json');
+// WyBuild and other Android build systems commonly detect the standard root-level file.
+const source = fs.existsSync(rootSource) ? rootSource : setupSource;
 const appDir = path.join(android, 'app');
 const appGradle = path.join(appDir, 'build.gradle');
 const manifestPath = path.join(appDir, 'src', 'main', 'AndroidManifest.xml');
 const capacitorConfigPath = path.join(root, 'capacitor.config.json');
 const rootGradle = path.join(android, 'build.gradle');
-if (!fs.existsSync(source)) throw new Error('Missing android-setup/google-services.json.');
+if (!fs.existsSync(source)) throw new Error('Missing google-services.json at project root or android-setup/google-services.json.');
 const firebaseConfig = JSON.parse(fs.readFileSync(source, 'utf8'));
 const capacitorConfig = JSON.parse(fs.readFileSync(capacitorConfigPath, 'utf8'));
 const firebasePackage = firebaseConfig.client?.[0]?.client_info?.android_client_info?.package_name;

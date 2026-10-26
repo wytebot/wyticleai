@@ -6,6 +6,7 @@ import { App as CapacitorApp } from '@capacitor/app';
 import { Browser } from '@capacitor/browser';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+import { PushNotifications } from '@capacitor/push-notifications';
 import { jsPDF } from 'jspdf';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
@@ -123,6 +124,34 @@ function App(){
   useEffect(()=>{ const params=new URLSearchParams(window.location.search); const returnedRef=params.get('payment_ref'); if(returnedRef&&/^[a-zA-Z0-9_-]{8,80}$/.test(returnedRef)){localStorage.setItem('wryte-pending-payment',returnedRef);window.history.replaceState({},'',window.location.pathname);} if(params.get('connect')==='blogger_success'){setToast('Blogger connected successfully');window.history.replaceState({},'',window.location.pathname);} else if(params.get('connect')==='blogger_failed'){setToast('Blogger connection failed. Please try again.');window.history.replaceState({},'',window.location.pathname);} },[]);
   useEffect(()=>{if(!Capacitor.isNativePlatform())return;let listener,cancelled=false;CapacitorApp.addListener('appUrlOpen',async event=>{try{const url=new URL(event.url);const connect=url.searchParams.get('connect');const payment=url.searchParams.get('payment_ref');if(connect==='blogger_success'){await refreshAccount();setToast('Blogger connected successfully');}else if(connect==='blogger_failed'){setToast('Blogger connection failed. Please try again.');}if(payment){localStorage.setItem('wryte-pending-payment',payment);await verifyPendingPayment();}await Browser.close().catch(()=>{});}catch(e){console.warn('Deep link handling:',e.message);}}).then(v=>{if(cancelled)v.remove();else listener=v;});return()=>{cancelled=true;listener?.remove?.();};},[firebaseUser]);
   useEffect(()=>{ if(!toast)return; const t=setTimeout(()=>setToast(''),toast.length>95?6500:3200); return()=>clearTimeout(t); },[toast]);
+  // Register native Android/iOS push tokens after login. The server sends FCM pushes even when the app is backgrounded or closed.
+  useEffect(()=>{
+    if(!Capacitor.isNativePlatform()||!firebaseUser||!API_BASE)return;
+    let cancelled=false;let registrationListener, actionListener, errorListener;
+    const setup=async()=>{
+      try{
+        let permission=await PushNotifications.checkPermissions();
+        if(permission.receive==='prompt'||permission.receive==='prompt-with-rationale')permission=await PushNotifications.requestPermissions();
+        if(permission.receive!=='granted')return;
+        registrationListener=await PushNotifications.addListener('registration',async token=>{
+          if(cancelled||!token?.value)return;
+          try{await apiFetch('/api/push/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:token.value,platform:Capacitor.getPlatform()})});}
+          catch(e){console.warn('Push token registration:',e.message);}
+        });
+        errorListener=await PushNotifications.addListener('registrationError',e=>console.warn('Native push registration failed:',e));
+        actionListener=await PushNotifications.addListener('pushNotificationActionPerformed',notification=>{
+          const data=notification?.notification?.data||{};
+          if(data.type==='generation_complete')setToast('Your generated content is ready');
+          else if(data.type==='scheduled_post_delivered')setToast('Your scheduled post was delivered');
+          if(data.projectId){dbPromise.then(db=>db.get('projects',data.projectId)).then(project=>{if(project&&project.ownerUid===firebaseUser.uid){setActive(project);setResponse(project);}}).catch(()=>{});}
+        });
+        await PushNotifications.register();
+      }catch(e){console.warn('Native push setup:',e.message);}
+    };
+    setup();
+    return()=>{cancelled=true;registrationListener?.remove?.();actionListener?.remove?.();errorListener?.remove?.();};
+  },[firebaseUser?.uid,API_BASE]);
+
   useEffect(()=>{if(!firebaseUser||!API_BASE)return;let alive=true;const syncScheduled=async()=>{try{const data=await apiFetch('/api/publish/scheduled');if(!alive)return;const jobs=new Map((data.scheduled||[]).map(j=>[j.id,j]));const db=await dbPromise;const all=await db.getAll('projects');let changed=false;for(const p of all){if(p.ownerUid!==firebaseUser.uid||!p.scheduleId)continue;const job=jobs.get(p.scheduleId);if(!job)continue;const status=job.status==='published'?'Published':job.status==='failed'?'Failed':job.status==='cancelled'?'Cancelled':'Scheduled';if(p.status!==status){p.status=status;p.publishResults=job.results||p.publishResults;p.scheduleError=job.error_message||null;p.updatedAt=now();await db.put('projects',p);changed=true;}}if(changed&&alive)setProjects((await db.getAll('projects')).filter(p=>p.ownerUid===firebaseUser.uid).sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt)));}catch(e){console.warn('Scheduled status sync:',e.message);}};syncScheduled();const timer=setInterval(syncScheduled,60000);return()=>{alive=false;clearInterval(timer)};},[firebaseUser?.uid]);
   const filtered = useMemo(()=>projects.filter(p=>`${p.title} ${p.niche||''}`.toLowerCase().includes(search.toLowerCase())),[projects,search]);
   const saveProject = async p => { const db=await dbPromise; const owned={...p,ownerUid:user?.uid||p.ownerUid||'local'}; await db.put('projects',owned); const all=await db.getAll('projects'); setProjects(all.filter(x=>x.ownerUid===owned.ownerUid).sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt))); };

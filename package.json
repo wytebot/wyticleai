@@ -28,7 +28,8 @@
     "@capacitor/filesystem": "^7.1.4",
     "@capacitor/share": "^7.0.2",
     "docx": "^9.5.1",
-    "jspdf": "^3.0.3"
+    "jspdf": "^3.0.3",
+    "@capacitor/push-notifications": "^7.0.2"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.4.3",

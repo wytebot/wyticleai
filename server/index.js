@@ -69,12 +69,32 @@ async function auth(req,res,next){
 }
 function safeEqual(a,b){const x=Buffer.from(String(a)),y=Buffer.from(String(b));return x.length===y.length&&crypto.timingSafeEqual(x,y);} // compares BYTE lengths; timingSafeEqual throws on unequal buffers
 function dbRequired(req,res,next){if(!supabase)return res.status(503).json({error:'Account database is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'});next();}
+async function sendPushToUser(uid,{title,body,type,projectId}={}){
+  if(!firebaseReady||!supabase||!uid)return;
+  try{
+    const {data:devices,error}=await supabase.from('wryte_push_devices').select('token').eq('user_id',String(uid)).eq('active',true).limit(20);
+    if(error)throw error;
+    for(const device of devices||[]){
+      try{await admin.messaging().send({token:device.token,notification:{title:String(title||'Wyticle AI').slice(0,120),body:String(body||'Your update is ready.').slice(0,240)},data:{type:String(type||'update'),...(projectId?{projectId:String(projectId)}:{})},android:{priority:'high',notification:{channelId:'wyticle-updates',sound:'default'}},apns:{payload:{aps:{sound:'default'}}}});}
+      catch(e){if(['messaging/registration-token-not-registered','messaging/invalid-registration-token'].includes(e.code)){await supabase.from('wryte_push_devices').update({active:false,updated_at:new Date().toISOString()}).eq('token',device.token);}else console.warn('Push delivery failed:',e.code||e.message);}
+    }
+  }catch(e){console.warn('Push notification skipped:',e.message);}
+}
 async function ensureWallet(uid){
   let {data,error}=await supabase.from('wryte_wallets').select('*').eq('user_id',uid).maybeSingle(); if(error)throw error;
   if(!data){const r=await supabase.from('wryte_wallets').insert({user_id:uid,credits:0,free_generations_used:0,trial_project_ids:[]}).select('*').single(); if(r.error && r.error.code!=='23505')throw r.error; if(r.data)data=r.data; else {const again=await supabase.from('wryte_wallets').select('*').eq('user_id',uid).single(); if(again.error)throw again.error;data=again.data;}}
   return data;
 }
 app.get('/health',(_req,res)=>res.json({ok:true,service:'wyticle-ai-api',authConfigured:firebaseReady,databaseConfigured:Boolean(supabase),aiConfigured:Boolean(OPENAI_API_KEY)}));
+app.post('/api/push/register',auth,dbRequired,async(req,res)=>{
+  const token=String(req.body?.token||'').trim();const platform=String(req.body?.platform||'unknown');
+  if(token.length<40||token.length>4096||!/^[A-Za-z0-9_./:-]+$/.test(token))return res.status(400).json({error:'Invalid push registration token.'});
+  if(!['android','ios'].includes(platform))return res.status(400).json({error:'Unsupported native push platform.'});
+  try{const {error}=await supabase.from('wryte_push_devices').upsert({user_id:req.user.uid,token,platform,active:true,updated_at:new Date().toISOString()},{onConflict:'token'});if(error)throw error;res.json({ok:true});}
+  catch(e){console.error('Push registration:',e.message);res.status(500).json({error:'Unable to register this device for notifications.'});}
+});
+app.delete('/api/push/register',auth,dbRequired,async(req,res)=>{const token=String(req.body?.token||'').trim();if(!token)return res.status(400).json({error:'Push token is required.'});try{const {error}=await supabase.from('wryte_push_devices').update({active:false,updated_at:new Date().toISOString()}).eq('user_id',req.user.uid).eq('token',token);if(error)throw error;res.json({ok:true});}catch(e){res.status(500).json({error:'Unable to unregister this device.'});}});
+
 app.get('/api/me',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({user:req.user,wallet:{credits:w.credits,freeGenerationsRemaining:Math.max(0,2-(w.free_generations_used||0))},connectedSites:await listSites(req.user.uid)});}catch(e){console.error(e);res.status(500).json({error:'Unable to load your account.'});}});
 function isPrivateAddress(a){if(net.isIPv6(a)){const l=a.toLowerCase();return l==='::1'||l==='::'||l.startsWith('fc')||l.startsWith('fd')||l.startsWith('fe8')||l.startsWith('fe9')||l.startsWith('fea')||l.startsWith('feb')||l.startsWith('::ffff:');}const [x,y]=a.split('.').map(Number);return x===0||x===10||x===127||(x===100&&y>=64&&y<=127)||(x===169&&y===254)||(x===172&&y>=16&&y<=31)||(x===192&&y===168)||x>=224;}
 async function assertPublicHost(hostname){const h=hostname.replace(/^\[|\]$/g,'');if(net.isIP(h))throw new Error('Use your site domain name, not an IP address.');const addrs=await dns.lookup(h,{all:true});if(!addrs.length||addrs.some(x=>isPrivateAddress(x.address)))throw new Error('That site resolves to a private network address.');}
@@ -289,7 +309,7 @@ async function processScheduledPosts(){
         const completedAt=new Date().toISOString();
         const update={status:allSucceeded?'published':'failed',results,error_message:allSucceeded?null:results.map(r=>r.status==='failed'?`${r.destination}: ${r.message}`:null).filter(Boolean).join('; ')||'One or more destinations did not confirm delivery.',completed_at:completedAt,updated_at:completedAt};
         if(allSucceeded){update.project=null;update.content_purged_at=completedAt;}
-        const {error:updateError}=await supabase.from('wryte_scheduled_posts').update(update).eq('id',job.id).eq('status','processing');if(updateError)throw updateError;
+        const {error:updateError}=await supabase.from('wryte_scheduled_posts').update(update).eq('id',job.id).eq('status','processing');if(updateError)throw updateError;if(allSucceeded)sendPushToUser(job.user_id,{title:'Scheduled post delivered',body:`“${String(job.project?.title||'Your article').slice(0,100)}” was published successfully.`,type:'scheduled_post_delivered',projectId:job.project_id});
       }
       catch(e){await supabase.from('wryte_scheduled_posts').update({status:'failed',error_message:String(e.message||'Scheduled publish failed').slice(0,1000),completed_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',job.id).eq('status','processing');}
     }
@@ -366,7 +386,7 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
     const usage={inputTokens:data.usage?.input_tokens||0,outputTokens:data.usage?.output_tokens||0,searchCalls:(data.output||[]).filter(x=>x.type==='web_search_call').length,model:OPENAI_MODEL};parsed.usage=usage;
     if(reservation?.reservationId)await settleUsage(reservation.reservationId,req.user.uid,usage,action,targetProject);
     else if(reservation?.free&&action==='initial') {const {error}=await supabase.rpc('wryte_register_trial_project',{p_user_id:req.user.uid,p_project_id:targetProject});if(error)throw new Error('Could not save free article entitlement. Please contact support.');}
-    const updated=await ensureWallet(req.user.uid);parsed.billing={credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0)),chargedCredits:reservation?.free?0:undefined,projectId:targetProject};parsed.documentType=docType;res.json(parsed);
+    const updated=await ensureWallet(req.user.uid);parsed.billing={credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0)),chargedCredits:reservation?.free?0:undefined,projectId:targetProject};parsed.documentType=docType;sendPushToUser(req.user.uid,{title:isDiagnosis?'Your content check is ready':'Your content is ready',body:isDiagnosis?'Wyticle AI finished checking your content.':'Wyticle AI finished generating your content.',type:'generation_complete',projectId:targetProject});res.json(parsed);
   }catch(e){if(reservation?.reservationId){try{await supabase.rpc('wryte_release_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid});}catch{}}console.error('Generate:',e.message);res.status(e.status||500).json({error:e.status===402?e.message:(e.message||'Unexpected generation error. Please retry.')});}
 });
 

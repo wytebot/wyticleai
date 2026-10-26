@@ -89,7 +89,7 @@ The project includes the native Firebase Authentication, Filesystem, Share, Brow
 
 Native Android sign-in uses the bundled Android Firebase configuration and does not require the Firebase Web config. Browser/PWA sign-in still requires a registered Firebase Web app config in `VITE_FIREBASE_CONFIG`. For native Google sign-in:
 
-1. The supplied Android Firebase configuration is bundled at `android-setup/google-services.json` for application ID `app.wyticleai.vercel`; the Capacitor `appId` matches it.
+1. The supplied Android Firebase configuration is bundled at the project root as `google-services.json` so WyBuild can detect native Firebase authentication; a matching copy is also kept at `android-setup/google-services.json`. It is for application ID `app.wyticleai.vercel`, matching the Capacitor `appId`.
 2. Add the SHA-1 and SHA-256 fingerprints for your development and Play App Signing certificates in Firebase and enable the Google provider in Firebase Authentication. The uploaded config currently has an empty `oauth_client` list, so native Google sign-in is not fully ready yet: register fingerprints, enable Google sign-in, then download a fresh `google-services.json` containing the OAuth client entries.
 3. Run `npx cap add android`, then `npm run cap:firebase-setup`, then `npx cap sync android`. The setup script copies the JSON and configures the Google Services Gradle plugin.
 4. In `android/app/src/main/AndroidManifest.xml`, add this intent filter inside the `MainActivity` `<activity>` element so Blogger authorization and payment returns can reopen the app:
@@ -124,7 +124,7 @@ Before public launch:
 
 ### Frontend build variables (`.env`)
 
-- `VITE_FIREBASE_CONFIG` — required for browser/PWA Google sign-in; JSON for the Firebase **Web app**. The APK's native sign-in uses `android-setup/google-services.json` instead.
+- `VITE_FIREBASE_CONFIG` — required for browser/PWA Google sign-in; JSON for the Firebase **Web app**. The APK's native sign-in uses the root `google-services.json` (mirrored under `android-setup/`) instead.
 - `VITE_API_BASE_URL` — required for every live backend operation in browser and APK. Use the public HTTPS API URL in production and before building the APK; `localhost` is only for local browser development.
 
 Never put private keys, OAuth client secrets, Supabase service-role keys, or OpenAI keys in a `VITE_` variable because frontend values are public.
@@ -223,3 +223,8 @@ The plus button opens the project picker for Articles, Letters, Emails, Resumes/
 Completed projects offer PDF, editable DOCX, plain TXT, and HTML downloads in browser and Capacitor. Browser downloads use a standard file download; the standalone app writes the export to its cache and opens the native share sheet so the user can save or share it. PDF/DOCX exports preserve headings, paragraphs, lists, and supplied sender/recipient metadata where available. AI must not invent addresses, qualifications, quotes, figures, or other missing facts.
 
 The frontend now uses `jspdf` for PDF creation and `docx` for real Office Open XML Word files. Run `npm install` after pulling the updated package, then `npm run build`. Live AI/provider integration and Android device export still need end-to-end testing with configured credentials.
+
+
+## Native push notifications
+
+Native push notifications are sent when AI content generation finishes and when a scheduled Blogger post is confirmed delivered. The app registers its Capacitor Push Notifications token after sign-in. Apply `server/sql/native-push-notifications-migration.sql` in Supabase. Configure `FIREBASE_SERVICE_ACCOUNT_JSON` on the API server with a Firebase service account that can send FCM messages, then rebuild/sync Android so `@capacitor/push-notifications` is included. Android 13+ users must grant notification permission. FCM delivery requires a real device and Firebase/Google Play services; simulator or browser builds do not receive native push.
