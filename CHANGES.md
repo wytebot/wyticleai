@@ -52,3 +52,8 @@ database functions and live Flutterwave/Blogger/OpenAI flows could not be exerci
 - Push delivery reads from Supabase first and falls back to Firestore if the Supabase lookup fails or Supabase is not configured.
 - Device unregister and invalid-token cleanup support both stores.
 - This fallback is limited to push-device registry storage; it does not replace Supabase for account, credit, article, or scheduled-post data.
+
+## Text size, custom pickers, visible generation errors
+- Text size setting: menu -> "Text size" (also in Settings). Small / Default / Large / Extra large. All font sizes now scale via `--fs`.
+- Native browser pickers (niche, length, editor Text style / Font type, document Date) replaced by in-app bottom-sheet pickers and a calendar. Schedule time uses date + hour + minute pickers.
+- Generation failures no longer drop you silently on the Projects page: the Create form reopens with your details and the error is shown (plus a toast). API calls now have timeouts and clear network / 504 messages.
