@@ -113,6 +113,7 @@ function App(){
   const [formOpen,setFormOpen] = useState(false);
   const [fontScale,setFontScale] = useState(()=>{try{const v=parseFloat(localStorage.getItem('wyticle-font-scale'));return FONT_SCALES.some(f=>f[1]===v)?v:1;}catch{return 1;}});
   useEffect(()=>{document.documentElement.style.setProperty('--fs',String(fontScale));try{localStorage.setItem('wyticle-font-scale',String(fontScale));}catch{}},[fontScale]);
+  useEffect(()=>{const enhance=()=>{document.querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]),textarea').forEach(el=>{if(el.type==='password'||el.type==='email'||el.type==='number')return;el.setAttribute('spellcheck','true');el.setAttribute('autocorrect','on');el.setAttribute('autocapitalize','sentences');if(!el.hasAttribute('autocomplete'))el.setAttribute('autocomplete','on');});};enhance();const observer=new MutationObserver(enhance);observer.observe(document.body,{childList:true,subtree:true});return()=>observer.disconnect();},[]);
   const [documentType,setDocumentType] = useState('article');
   const [downloadProject,setDownloadProject] = useState(null);
   const [form,setForm] = useState({title:'',style:'',niche:'Personal Finance',customNiche:'',featuredImage:false,audience:'',country:'',length:'Detailed (1,200–1,800 words)',additional:'',recipient:'',sender:'',recipientAddress:'',senderAddress:'',organization:'',date:'',purpose:''});
