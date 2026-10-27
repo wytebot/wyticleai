@@ -143,6 +143,8 @@ function isPrivateAddress(a){if(net.isIPv6(a)){const l=a.toLowerCase();return l=
 async function assertPublicHost(hostname){const h=hostname.replace(/^\[|\]$/g,'');if(net.isIP(h))throw new Error('Use your site domain name, not an IP address.');const addrs=await dns.lookup(h,{all:true});if(!addrs.length||addrs.some(x=>isPrivateAddress(x.address)))throw new Error('That site resolves to a private network address.');}
 async function listSites(uid){const {data,error}=await supabase.from('wryte_connections').select('id,provider,site_url,blog_id,blog_name,created_at').eq('user_id',uid);if(error)throw error;return data||[];}
 app.get('/api/sites',auth,dbRequired,async(req,res)=>{try{res.json({sites:await listSites(req.user.uid)});}catch(e){res.status(500).json({error:'Unable to load connected sites.'});}});
+// Disconnect Blogger publishing without deleting the user's Google Drive archive settings.
+app.delete('/api/connect/blogger',auth,dbRequired,async(req,res)=>{try{const {error}=await supabase.from('wryte_connections').delete().eq('user_id',req.user.uid).eq('provider','blogger');if(error)throw error;res.json({ok:true,connected:false});}catch(e){console.error('Blogger disconnect:',e.message);res.status(500).json({error:'Unable to disconnect Blogger right now.'});}});
 
 // Blogger OAuth: short-lived state is server stored and tied to a verified Firebase user.
 app.post('/api/connect/blogger/start',auth,dbRequired,async(req,res)=>{

@@ -130,3 +130,14 @@
 .offline-banner{position:sticky;top:0;z-index:25;display:flex;align-items:center;gap:9px;padding:10px 16px;background:#292113;border-bottom:1px solid #594323;color:#f2d7a0;font-size:12px;line-height:1.5}
 .offline-dot{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:#e5b85c}
 @media(max-width:760px){.offline-banner{padding:9px 12px;font-size:11px}}
+
+/* Fixed device-width layout: text size changes must not scale the viewport or cause horizontal page growth. */
+html{width:100%;max-width:100%;overflow-x:clip;-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body,#root{width:100%;max-width:100%;min-width:0;overflow-x:clip}
+*,*::before,*::after{box-sizing:border-box}
+#root img,#root video,#root canvas,#root iframe{max-width:100%}
+#root input,#root textarea,#root select,#root button{max-width:100%;min-width:0}
+#root p,#root small,#root strong,#root label,#root h1,#root h2,#root h3,#root span{overflow-wrap:anywhere}
+.settings-row-actions{display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap;flex:0 0 auto}
+.danger-btn{border-color:#693434!important;color:#ffb3b3!important}
+@media(max-width:420px){.settings-row{gap:8px}.settings-row-actions .ghost-btn{padding:8px 10px;font-size:calc(10px*var(--fs,1))}}
