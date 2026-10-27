@@ -89,3 +89,18 @@ database functions and live Flutterwave/Blogger/OpenAI flows could not be exerci
 **Not verified here (no network/npm in this environment)**
 - The frontend was syntax-checked with TypeScript, not built with Vite; the Gemini calls were tested against a mocked API, not live. Run one real article, revision, diagnosis and image, and one browser plus one APK sign-in, before releasing.
 - Model IDs come from the existing configuration and Google's docs at the time of writing; confirm they are enabled for your API key in AI Studio.
+
+## Browser sign-in loop fix + stronger results for every project type
+**Sign-in (browser)**
+- Root cause of "returns to the login page after Google": browsers that block third-party storage (Chrome/Brave/Safari/Firefox) lose the redirect result when the Firebase auth domain differs from the site domain.
+- Web sign-in now tries: popup -> Google Identity Services token sign-in (no redirect, no cross-site iframe) -> redirect (only when the auth domain is the site's own domain). If a redirect ever returns without a session, the app says so and switches to the token method automatically.
+- ONE-TIME SETUP for the token method: Google Cloud Console -> APIs & Services -> Credentials -> the Web client (auto created by Google Service) -> Authorized JavaScript origins -> add your site origin (for example https://your-app.vercel.app). `VITE_GOOGLE_WEB_CLIENT_ID` can override the client ID.
+- Optional, official alternative: proxy `/__/auth/*` on your own domain to `https://<project>.firebaseapp.com/__/auth/*`, set `VITE_FIREBASE_AUTH_DOMAIN` to your domain, and add `https://<your-domain>/__/auth/handler` as an authorized redirect URI on the same Web client.
+
+**Results**
+- Fixed: documents (emails, letters, resumes, ...) were silently told "Length: 1,200-1,800 words" and "Niche: Personal Finance" because of hidden article defaults in the form. Documents now get a per-type length and ignore article-only fields.
+- Per-type structure, layout and length specs for all 11 document types (letter, email, resume, cover letter, proposal, report, business plan, meeting minutes, social post, product description, press release) plus a minimum-length check per type.
+- System prompt: language matching, prompt-injection safety, no meta commentary, placeholder rules and a self-check list.
+- When Gemini returns unusable output (too short, truncated, "rest unchanged" placeholders) the retry now tells it exactly what was wrong. Revisions and fixes are rejected and retried if they silently drop most of the content. Stray markdown bold is converted to HTML.
+- Article length floor raised to 85% of the requested minimum; article guidance adds audience/country fit, tables/checklists and anti-repetition rules.
+- Tip: set `GEMINI_THINKING_LEVEL=medium` (or `high`) on the server for the best quality; it uses more output tokens, so check your credit pricing.

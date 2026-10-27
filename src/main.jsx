@@ -12,7 +12,7 @@ import { jsPDF } from 'jspdf';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithRedirect, signInWithPopup, getRedirectResult, onAuthStateChanged } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithRedirect, signInWithPopup, signInWithCredential, getRedirectResult, onAuthStateChanged } from 'firebase/auth';
 import { Activity, Download, RefreshCw, ArrowLeft, ArrowRight, ArrowDown, ArrowUp, BookOpen, Bold, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3, CloudUpload, FileText, Globe, Heading, ImagePlus, Italic, Link as LinkIcon, List, ListOrdered, LoaderCircle, LogOut, Menu, MoreHorizontal, PenLine, Plus, Redo2, Search, Settings, ShieldCheck, Sparkles, Strikethrough, Trash2, Underline, Video, WandSparkles, X, Zap, CalendarClock, Undo2, Type } from 'lucide-react';
 import './styles.css';
 
@@ -160,7 +160,7 @@ function App(){
     if(Capacitor.isNativePlatform() || !auth) return;
     let alive=true;let pending=false;try{pending=sessionStorage.getItem('wryte-auth-redirect')==='1';}catch{}
     if(pending)setAuthBusy(true); // returning from Google: keep the sign-in button busy instead of flashing the signed-out screen
-    getRedirectResult(auth).then(cred=>{if(alive&&cred?.user)acceptSignedInUser(cred.user,false);}).catch(e=>{ if(alive&&e?.code) setAuthError(friendlyAuthError(e)); }).finally(()=>{try{sessionStorage.removeItem('wryte-auth-redirect');}catch{}if(alive&&pending)setAuthBusy(false);});
+    getRedirectResult(auth).then(cred=>{if(!alive)return;if(cred?.user)acceptSignedInUser(cred.user,false);else if(pending&&!auth.currentUser){try{localStorage.setItem('wryte-auth-method','gis');}catch{}setAuthError('Your browser blocked the sign-in handoff after Google. Tap Continue with Google again - it will use a different method.');}}).catch(e=>{ if(alive&&e?.code) setAuthError(friendlyAuthError(e)); }).finally(()=>{try{sessionStorage.removeItem('wryte-auth-redirect');}catch{}if(alive&&pending)setAuthBusy(false);});
     return ()=>{alive=false;};
   },[]);
   useEffect(()=>{
@@ -255,15 +255,22 @@ function App(){
       if(isEmbeddedBrowser()){setAuthError('Google blocks sign-in inside this in-app browser. Open this page in Chrome or Safari and try again.');return;}
       if(!navigator.onLine){setAuthError('You appear to be offline. Check your connection and try again.');return;}
       const provider=new GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});
+      const firstParty=(()=>{try{return firebaseConfig.authDomain===window.location.host;}catch{return false;}})();
       const useRedirect=()=>{try{sessionStorage.setItem('wryte-auth-redirect','1');}catch{}return signInWithRedirect(auth,provider);};
-      // Installed PWAs (esp. iOS) cannot reliably open popups; use the full-page redirect there.
-      if(isStandalonePwa()){await useRedirect();return;}
+      const useGoogleToken=async()=>{const token=await googleAccessToken();const cred=await signInWithCredential(auth,GoogleAuthProvider.credential(null,token));try{localStorage.setItem('wryte-auth-method','gis');}catch{}if(cred?.user)await acceptSignedInUser(cred.user,false);};
+      let preferToken=false;try{preferToken=localStorage.getItem('wryte-auth-method')==='gis';}catch{}
+      // Redirect sign-in only survives when the auth domain is this site's own domain (or the browser allows third-party storage).
+      if(isStandalonePwa()&&firstParty){await useRedirect();return;}
+      if(preferToken||isStandalonePwa()){try{await useGoogleToken();}catch(ge){try{localStorage.removeItem('wryte-auth-method');}catch{}throw ge;}return;} // a failed token sign-in clears the preference so the next tap tries the popup again
       try{
         const cred=await signInWithPopup(auth,provider);
         if(cred?.user)await acceptSignedInUser(cred.user,false);
       }catch(pe){
-        if(['auth/popup-blocked','auth/operation-not-supported-in-this-environment','auth/web-storage-unsupported'].includes(pe?.code)){await useRedirect();return;}
+        if(['auth/popup-blocked','auth/operation-not-supported-in-this-environment','auth/web-storage-unsupported','auth/internal-error'].includes(pe?.code)){
+          try{await useGoogleToken();return;}catch(ge){if(firstParty){await useRedirect();return;}throw ge;}
+        }
         if(pe?.code==='auth/cancelled-popup-request')return; // a newer sign-in attempt replaced this one
+        if(pe?.code==='auth/popup-closed-by-user')throw pe;
         throw pe;
       }
     }catch(e){setAuthError(friendlyAuthError(e));}
@@ -426,10 +433,35 @@ function App(){
 function Welcome({onStart}){return <div className="welcome-page"><div className="welcome-nav"><Logo/><span className="tiny-label">YOUR WRITING WORKSPACE</span></div><div className="welcome-content"><div className="welcome-copy"><div className="welcome-pill"><span className="live-dot"/> YOUR IDEAS, WRITTEN BETTER</div><h1>Write with purpose.<br/><span>Publish with confidence.</span></h1><p>From a rough idea to a polished, search-ready article. Wyticle AI helps you write in your own voice, refine every detail, and publish when you're ready.</p><button className="primary-btn start-btn" onClick={onStart}>Start writing <ArrowRight size={17}/></button><div className="welcome-proof"><span><CheckCircle2 size={15}/> Two free article generations</span><span><CheckCircle2 size={15}/> Blogger publishing</span></div></div><div className="welcome-art" aria-label="Animated writing workspace illustration"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="art-glow"/><div className="floating-note note-one"><span className="note-dot"/> SEO-ready structure</div><div className="floating-note note-two"><Sparkles size={14}/> Natural voice</div><div className="paper-card"><div className="paper-top"><div className="mini-brand">W.</div><div className="paper-lines"><i/><i/></div><MoreHorizontal size={15}/></div><div className="paper-title"><i/><i/><i/></div><div className="paper-image"><div className="image-sun"/><div className="image-hill hill-a"/><div className="image-hill hill-b"/></div><div className="paper-lines body-lines"><i/><i/><i/><i/><i/></div><div className="paper-footer"><span><Check size={12}/> Ready to publish</span><span className="footer-pill"/></div></div><div className="floating-check"><Check size={18}/></div><div className="sparkle sparkle-a">✳</div><div className="sparkle sparkle-b">✧</div></div></div><div className="welcome-footer"><span>MADE FOR PEOPLE WHO CARE ABOUT THEIR WORDS</span><span>WYTICLE AI · WRITE BETTER</span></div></div>}
 function Logo(){return <div className="logo-lockup"><div className="brand-mark"><PenLine size={18}/><Sparkles size={9} className="mark-spark"/></div><span>Wyticle<span className="logo-light"> AI</span></span></div>}
 function GoogleG(){return <span className="google-g">G</span>}
+
+// Google Identity Services fallback: signs in without a redirect or Firebase's cross-site iframe, so it still works in browsers that block third-party storage.
+// The Web OAuth client below must list this site's origin under "Authorized JavaScript origins" (Google Cloud Console -> APIs & Services -> Credentials).
+const WEB_GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID || '589252246114-pdlhe9mbu5u80p554039bdp4pp1e3ada.apps.googleusercontent.com';
+function loadGoogleIdentity(){
+  return new Promise((resolve,reject)=>{
+    const ready=()=>window.google?.accounts?.oauth2?resolve(window.google.accounts.oauth2):reject(new Error('Google sign-in did not load.'));
+    if(window.google?.accounts?.oauth2)return resolve(window.google.accounts.oauth2);
+    const fail=()=>reject(new Error('Could not load Google sign-in. Check your connection or turn off your ad blocker for this site.'));
+    const existing=document.querySelector('script[data-gis]');
+    if(existing){existing.addEventListener('load',ready);existing.addEventListener('error',fail);return;}
+    const sc=document.createElement('script');sc.src='https://accounts.google.com/gsi/client';sc.async=true;sc.defer=true;sc.dataset.gis='1';sc.onload=ready;sc.onerror=fail;document.head.appendChild(sc);
+  });
+}
+function googleAccessToken(){
+  return loadGoogleIdentity().then(oauth2=>new Promise((resolve,reject)=>{
+    const client=oauth2.initTokenClient({client_id:WEB_GOOGLE_CLIENT_ID,scope:'openid email profile',prompt:'select_account',
+      callback:r=>{if(r?.access_token)resolve(r.access_token);else reject(Object.assign(new Error(r?.error_description||r?.error||'Google sign-in failed.'),{code:`gis/${r?.error||'failed'}`}));},
+      error_callback:e=>reject(Object.assign(new Error(e?.message||e?.type||'Google sign-in failed.'),{code:`gis/${e?.type||'failed'}`}))});
+    client.requestAccessToken();
+  }));
+}
+if(typeof window!=='undefined'&&!Capacitor.isNativePlatform())setTimeout(()=>loadGoogleIdentity().catch(()=>{}),1200); // preload so the click that follows still counts as a user gesture
 function isEmbeddedBrowser(){const ua=navigator.userAgent||'';return /FBAN|FBAV|Instagram|Line\/|MicroMessenger|Twitter|Snapchat|; wv\)|GSA\//i.test(ua);}
 function isStandalonePwa(){try{return Boolean(window.matchMedia?.('(display-mode: standalone)')?.matches||window.navigator.standalone);}catch{return false;}}
 function friendlyAuthError(error){
   const code=String(error?.code||'');const msg=String(error?.message||'');const text=`${code} ${msg}`;
+  if(code==='gis/popup_failed_to_open')return 'Your browser blocked the Google sign-in window. Allow pop-ups for this site and tap Continue with Google again.';
+  if(code==='gis/popup_closed')return `Sign-in was cancelled. If Google showed an "origin_mismatch" error, add ${window.location.origin} under Authorized JavaScript origins for the Web OAuth client in Google Cloud Console (APIs & Services, Credentials), then try again.`;
   if(msg.includes('28444')||/developer console is not set up/i.test(msg))return 'Google sign-in is not set up for this APK yet. Add this APK\'s SHA-1 and SHA-256 in Firebase, download a fresh google-services.json, and rebuild.';
   if(/popup-closed|cancelled|canceled|user.?cancel|12501|\b-5\b/i.test(text))return 'Sign-in was cancelled. You can try again whenever you are ready.';
   if(/network|timeout|\b7\b.*network|unavailable/i.test(text)&&!/play.?services/i.test(text))return 'Google sign-in could not connect. Check your internet and try again.';
