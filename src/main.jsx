@@ -394,9 +394,9 @@ function App(){
   async function connectBloggerNative(u){
     let res;
     try{res=await FirebaseAuthentication.signInWithGoogle({scopes:BLOGGER_SCOPES,useCredentialManager:false});}
-    catch(e){if(/cancel|12501|dismiss/i.test(`${e?.code||''} ${e?.message||''}`))return 'cancelled';console.warn('Native Google authorization unavailable:',e?.message);return false;}
+    catch(e){if(/cancel|12501|dismiss/i.test(`${e?.code||''} ${e?.message||''}`))return 'cancelled';console.warn('Native Google authorization unavailable:',e?.message);setToast(`Native Google prompt unavailable (${e?.message||'unknown reason'}). Opening browser sign-in instead.`);return false;}
     const code=res?.credential?.serverAuthCode;
-    if(!code){console.warn('Native Google sign-in returned no serverAuthCode; using the browser flow.');return false;}
+    if(!code){console.warn('Native Google sign-in returned no serverAuthCode; using the browser flow.');setToast('Native Google prompt did not return a code. Opening browser sign-in instead.');return false;}
     return exchangeBloggerCode(code,'android',u);
   }
   // Browser: Google popup that hands the code straight back to the page, so there is no redirect URI to mismatch.

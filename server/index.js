@@ -78,6 +78,10 @@ const API_PUBLIC_URL=(process.env.API_PUBLIC_URL||'http://localhost:8787').repla
 // Add more with BILLING_BYPASS_EMAILS=a@x.com,b@y.com
 const BILLING_BYPASS_EMAILS=new Set(['ilemobayotolulope11092003@gmail.com',...String(process.env.BILLING_BYPASS_EMAILS||'').split(',')].map(e=>e.trim().toLowerCase()).filter(Boolean));
 const isBillingExempt=(user)=>Boolean(user?.emailVerified&&user.email&&BILLING_BYPASS_EMAILS.has(String(user.email).trim().toLowerCase()));
+// Hosting dashboards often keep quotes or stray spaces pasted with a value, and Google then answers "Error 401: invalid_client". Clean both Google OAuth values once at startup.
+for(const k of ['GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET']){if(process.env[k])process.env[k]=process.env[k].trim().replace(/^["'`]+|["'`]+$/g,'').trim();}
+const googleClientIdProblem=()=>/^\d+-[a-z0-9_]+\.apps\.googleusercontent\.com$/i.test(process.env.GOOGLE_OAUTH_CLIENT_ID||'')?'':'GOOGLE_OAUTH_CLIENT_ID is not a valid Google OAuth client ID. It should look like 123456789-abc123.apps.googleusercontent.com (copy it from Google Cloud Console, APIs & Services, Credentials, your Web client).';
+if(process.env.GOOGLE_OAUTH_CLIENT_ID&&googleClientIdProblem())console.warn('[config] '+googleClientIdProblem());
 
 function requiredEnv(names){return names.filter(n=>!process.env[n]);}
 function encrypt(text){
@@ -142,7 +146,7 @@ app.get('/api/sites',auth,dbRequired,async(req,res)=>{try{res.json({sites:await 
 
 // Blogger OAuth: short-lived state is server stored and tied to a verified Firebase user.
 app.post('/api/connect/blogger/start',auth,dbRequired,async(req,res)=>{
-  const missing=requiredEnv(['GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET','TOKEN_ENCRYPTION_KEY']);if(missing.length)return res.status(503).json({error:`Blogger OAuth setup missing: ${missing.join(', ')}`});
+  const missing=requiredEnv(['GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET','TOKEN_ENCRYPTION_KEY']);if(missing.length)return res.status(503).json({error:`Blogger OAuth setup missing: ${missing.join(', ')}`});const badClient=googleClientIdProblem();if(badClient)return res.status(503).json({error:badClient});
   try{const state=crypto.randomBytes(32).toString('hex');const expires=new Date(Date.now()+10*60_000).toISOString();let returnUrl=APP_URL;try{const requested=new URL(req.body?.returnUrl||APP_URL);if(requested.origin===APP_URL||requested.protocol==='ai.wryte.app:')returnUrl=requested.toString();}catch{} await ensureWallet(req.user.uid);const {error}=await supabase.from('wryte_oauth_states').insert({state_hash:crypto.createHash('sha256').update(state).digest('hex'),user_id:req.user.uid,provider:'blogger',expires_at:expires,return_url:returnUrl});if(error)throw error;
     const url=new URL('https://accounts.google.com/o/oauth2/v2/auth');url.searchParams.set('client_id',process.env.GOOGLE_OAUTH_CLIENT_ID);url.searchParams.set('redirect_uri',`${API_PUBLIC_URL}/api/connect/blogger/callback`);url.searchParams.set('response_type','code');url.searchParams.set('scope','https://www.googleapis.com/auth/blogger https://www.googleapis.com/auth/drive');url.searchParams.set('access_type','offline');url.searchParams.set('prompt','consent');url.searchParams.set('state',state);res.json({url:url.toString()});
   }catch(e){console.error(e);res.status(500).json({error:'Unable to start Blogger authorization.'});}
@@ -158,12 +162,12 @@ async function saveBloggerConnection(userId,tokens){
 }
 const BLOGGER_SCOPES=['https://www.googleapis.com/auth/blogger','https://www.googleapis.com/auth/drive'];
 app.get('/api/connect/blogger/config',auth,(req,res)=>{
-  const clientId=process.env.GOOGLE_OAUTH_CLIENT_ID;if(!clientId)return res.status(503).json({error:'Blogger OAuth setup missing: GOOGLE_OAUTH_CLIENT_ID'});
+  const clientId=process.env.GOOGLE_OAUTH_CLIENT_ID;if(!clientId)return res.status(503).json({error:'Blogger OAuth setup missing: GOOGLE_OAUTH_CLIENT_ID'});const badId=googleClientIdProblem();if(badId)return res.status(503).json({error:badId});
   res.json({clientId,scopes:BLOGGER_SCOPES});
 });
 // Exchanges a Google authorization code from the in-page Google popup (web) or the native Android account chooser for tokens. No redirect URI is involved.
 app.post('/api/connect/blogger/exchange',auth,dbRequired,async(req,res)=>{
-  const missing=requiredEnv(['GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET','TOKEN_ENCRYPTION_KEY']);if(missing.length)return res.status(503).json({error:`Blogger OAuth setup missing: ${missing.join(', ')}`});
+  const missing=requiredEnv(['GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET','TOKEN_ENCRYPTION_KEY']);if(missing.length)return res.status(503).json({error:`Blogger OAuth setup missing: ${missing.join(', ')}`});const badClient=googleClientIdProblem();if(badClient)return res.status(503).json({error:badClient});
   const code=String(req.body?.code||'').trim();const source=req.body?.source==='android'?'android':'web';
   if(!code||code.length>2048)return res.status(400).json({error:'Missing Google authorization code.'});
   try{

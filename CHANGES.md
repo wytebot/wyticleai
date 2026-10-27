@@ -129,3 +129,9 @@ Use the Firebase "Web client (auto created by Google Service)" (client ID `58925
 - Diagnosis now runs a live Google Search fact-check for all 12 project types (article, letter, email, resume, cover letter, proposal, report, business plan, meeting minutes, social post, product description, press release). Only external facts are checked (figures, dates, laws, prices, studies, organisations); personal details, resume history and attendees are ignored because they cannot be verified. Each claim is labelled Verified / Partly correct / Incorrect / Unverified with the correct fact and its sources. If the fact-check fails, the audit still runs and says so.
 - "Fix issues" is in the report pop-up, in the report card, and next to the Diagnose button once a report exists. It sends every finding plus the verified corrections to the fix action, which is told to apply them exactly.
 - Billing: the fact-check is one grounded search request, included in the diagnosis reservation and settled on actual usage. Set `ENABLE_WEB_SEARCH=false` to turn live checks off.
+
+## "Error 401: invalid_client" on the Blogger browser flow
+- Google shows this when the client ID in the authorization link does not exist. The usual causes are a typo, a deleted client, a value copied with quotes or spaces (Vercel keeps them literally), or the client secret / an Android client ID pasted into GOOGLE_OAUTH_CLIENT_ID.
+- The server now trims spaces and quotes from GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET, and refuses to start the Google flow with a clear message when the ID is not shaped like `123456789-abc.apps.googleusercontent.com`.
+- The Android app now tells you why the native Google prompt was skipped before it falls back to the browser flow.
+- Use the Firebase Web client for both variables: ID `589252246114-pdlhe9mbu5u80p554039bdp4pp1e3ada.apps.googleusercontent.com`, plus that client's secret from Google Cloud Console -> APIs & Services -> Credentials.
