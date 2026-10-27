@@ -116,3 +116,10 @@
 .fact-sources{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:14px 0 4px;font-size:calc(11px*var(--fs,1));color:#888}
 .fact-sources a{color:#9bbcff;text-decoration:underline;overflow-wrap:anywhere}
 .diagnosis-card .full-btn{margin-top:14px}
+/* Distinctive Wyticle brand mark */
+.brand-mark{background:linear-gradient(145deg,#211c43,#101a28);border-color:#5a4e91;color:#a5f3fc;box-shadow:inset 0 1px 0 #ffffff18,0 4px 18px #8b5cf622;overflow:visible}
+.brand-glyph{font-family:Manrope,Inter,sans-serif;font-size:21px;font-weight:900;line-height:1;letter-spacing:-2px;background:linear-gradient(135deg,#c4b5fd 10%,#67e8f9 80%);-webkit-background-clip:text;background-clip:text;color:transparent;transform:skew(-7deg)}
+.brand-mark .mark-spark{color:#f0abfc;right:-4px;top:-5px;background:#15132b;border-radius:50%;padding:1px;box-sizing:content-box}
+.brand-mark.large .brand-glyph{font-size:31px}
+
+.credit-usage-breakdown{border:1px solid #303030;background:#151515;border-radius:15px;padding:14px;margin:14px 0}.credit-usage-title{display:flex;align-items:center;gap:8px;margin-bottom:10px}.credit-usage-title svg{color:#b9a7ff}.credit-usage-title strong{font-size:calc(12px*var(--fs,1))}.credit-usage-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid #292929;font-size:calc(10px*var(--fs,1));color:#aaa}.credit-usage-row strong{color:#eee;text-align:right;max-width:55%}.credit-usage-breakdown>p{font-size:calc(9px*var(--fs,1));line-height:1.65;color:#888;margin:8px 0 0}

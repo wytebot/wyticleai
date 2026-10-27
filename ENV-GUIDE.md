@@ -4,6 +4,7 @@
 | Variable | Get it from |
 |---|---|
 | `VITE_FIREBASE_CONFIG` | Firebase Console → Project settings → Your apps → **Web app** → SDK config. Paste as one-line JSON in single quotes (apiKey, authDomain, projectId, appId). |
+| `VITE_GOOGLE_WEB_CLIENT_ID` | Google Cloud Console → APIs & Services → Credentials → the **Web application** OAuth client ID. Add the deployed website origin to that same client. Public ID only; never put the client secret in a `VITE_` variable. |
 | `VITE_API_BASE_URL` | Your deployed backend HTTPS URL (Render/Railway/Fly/VPS). Must be HTTPS for the APK. |
 
 ## Backend (`server/.env`)
@@ -44,3 +45,7 @@ Run `server/sql/pricing-protection-migration.sql` and `server/sql/billing-card-m
 Push-device registrations use Supabase when available and automatically fall back to the Firebase project's **Cloud Firestore** collection `wyticlePushDevices` if the Supabase registry is missing or fails. This fallback is for push-device tokens only; user accounts, wallet/credits, article data, and scheduled posts still require the app's configured primary database.
 
 For Firestore fallback, enable **Cloud Firestore** in the same Firebase project used by Firebase Admin, and configure the backend service account using `FIREBASE_SERVICE_ACCOUNT_JSON` (or `GOOGLE_APPLICATION_CREDENTIALS`). The service account needs permission to read/write Firestore and send Firebase Cloud Messaging notifications. No client-side Firestore rules should be opened publicly; these writes are performed by the trusted backend. FCM delivery still requires a valid native device token and Android notification permission.
+
+## Google OAuth client ID consistency
+
+Set `VITE_GOOGLE_WEB_CLIENT_ID` in the frontend build environment (Vercel project settings) and rebuild. Set `GOOGLE_OAUTH_CLIENT_ID` plus `GOOGLE_OAUTH_CLIENT_SECRET` only in the backend environment. The frontend variable must contain the same Web application client ID as `GOOGLE_OAUTH_CLIENT_ID`; the secret must never be exposed to frontend code. Do not hard-code OAuth IDs or secrets in source. The Android `google-services.json` is Firebase native configuration and is kept for native sign-in.

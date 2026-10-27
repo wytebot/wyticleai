@@ -116,7 +116,7 @@ database functions and live Flutterwave/Blogger/OpenAI flows could not be exerci
 - The old redirect flow (`/api/connect/blogger/start` + `/callback`) is kept as the fallback.
 
 ### One-time Google Cloud setup (use ONE Web OAuth client for everything)
-Use the Firebase "Web client (auto created by Google Service)" (client ID `589252246114-pdlhe9mbu5u80p554039bdp4pp1e3ada.apps.googleusercontent.com`, found in google-services.json as the type-3 client).
+Set `VITE_GOOGLE_WEB_CLIENT_ID` to the Web application OAuth client ID from Google Cloud Console. Do not hard-code this ID in source. The Android `google-services.json` remains a native build configuration file.
 1. Google Cloud Console -> APIs & Services -> Credentials -> that Web client.
 2. Set server env `GOOGLE_OAUTH_CLIENT_ID` to that ID and `GOOGLE_OAUTH_CLIENT_SECRET` to its secret (shown on the client page). The code exchange only works when the app and server use the same client.
 3. Authorized JavaScript origins: add your site origin, for example `https://your-app.vercel.app` (needed for browser sign-in and the Blogger popup).
@@ -134,4 +134,4 @@ Use the Firebase "Web client (auto created by Google Service)" (client ID `58925
 - Google shows this when the client ID in the authorization link does not exist. The usual causes are a typo, a deleted client, a value copied with quotes or spaces (Vercel keeps them literally), or the client secret / an Android client ID pasted into GOOGLE_OAUTH_CLIENT_ID.
 - The server now trims spaces and quotes from GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET, and refuses to start the Google flow with a clear message when the ID is not shaped like `123456789-abc.apps.googleusercontent.com`.
 - The Android app now tells you why the native Google prompt was skipped before it falls back to the browser flow.
-- Use the Firebase Web client for both variables: ID `589252246114-pdlhe9mbu5u80p554039bdp4pp1e3ada.apps.googleusercontent.com`, plus that client's secret from Google Cloud Console -> APIs & Services -> Credentials.
+- Use the same Web application client ID for `VITE_GOOGLE_WEB_CLIENT_ID` and server-side `GOOGLE_OAUTH_CLIENT_ID`; keep its matching secret only in server-side `GOOGLE_OAUTH_CLIENT_SECRET`.
