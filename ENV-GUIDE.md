@@ -49,3 +49,10 @@ For Firestore fallback, enable **Cloud Firestore** in the same Firebase project 
 ## Google OAuth client ID consistency
 
 Set `VITE_GOOGLE_WEB_CLIENT_ID` in the frontend build environment (Vercel project settings) and rebuild. Set `GOOGLE_OAUTH_CLIENT_ID` plus `GOOGLE_OAUTH_CLIENT_SECRET` only in the backend environment. The frontend variable must contain the same Web application client ID as `GOOGLE_OAUTH_CLIENT_ID`; the secret must never be exposed to frontend code. Do not hard-code OAuth IDs or secrets in source. The Android `google-services.json` is Firebase native configuration and is kept for native sign-in.
+
+
+## Optional WyBuild shared billing gateway
+
+`VITE_WYBUILD_BILLING_BASE_URL` is optional. If set, only `/api/billing/*` requests are routed to that HTTPS base URL; AI generation, account data, Blogger OAuth/publishing, Drive, and push registration continue using `VITE_API_BASE_URL`. Set it to the public WyBuild backend origin (no trailing slash), then rebuild the web app/APK. The frontend sends `X-WyBuild-App-Id: wyticle` and `appId: wyticle` on billing requests.
+
+**Important:** this client switch alone does not make an arbitrary WyBuild deployment compatible. WyBuild must expose the same `/api/billing/packs`, `/checkout`, `/authorize`, and `/verify` routes; verify Firebase ID tokens for the same Firebase project (or implement an explicitly trusted identity bridge); scope transactions and entitlements by app ID; and include `app_id: wyticle` in Flutterwave v4 charge metadata so the WyBuild webhook credits the correct Wyticle account exactly once. Never expose Flutterwave, Supabase, Firebase service-account, or webhook secrets in `VITE_*` variables. The webhook URL is configured in the Flutterwave dashboard and is not called by the app directly.

@@ -135,3 +135,11 @@ Set `VITE_GOOGLE_WEB_CLIENT_ID` to the Web application OAuth client ID from Goog
 - The server now trims spaces and quotes from GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET, and refuses to start the Google flow with a clear message when the ID is not shaped like `123456789-abc.apps.googleusercontent.com`.
 - The Android app now tells you why the native Google prompt was skipped before it falls back to the browser flow.
 - Use the same Web application client ID for `VITE_GOOGLE_WEB_CLIENT_ID` and server-side `GOOGLE_OAUTH_CLIENT_ID`; keep its matching secret only in server-side `GOOGLE_OAUTH_CLIENT_SECRET`.
+
+## 2026-10-27 — Blogger picker, payment validation, and offline-first shell
+- Replaced the browser-native Blogger destination `<select>` with the app's custom bottom-sheet picker for a consistent mobile/native-style interaction.
+- Blogger destinations now show their human-readable blog title, falling back to a clean title-cased hostname rather than exposing long URLs in the list.
+- Added an online/offline status banner. It explains that local drafts remain available while AI, account sync, payments, and publishing require a connection.
+- Added a lightweight web service worker that caches the app shell and built assets for repeat/offline launches; API routes and non-GET requests are deliberately excluded from caching. Native Capacitor continues to use its local WebView bundle and local IndexedDB drafts.
+- Tightened client-side card checkout validation for card-number length, expiry format/month and expired cards, and CVV length. Existing server-side Flutterwave v4 verification and idempotent crediting are preserved; payment results still require server verification.
+- Build verification could not be completed in this environment because dependencies were not installed and npm install did not finish before timeout. Run `npm install` then `npm run build` before release.

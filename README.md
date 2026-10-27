@@ -127,6 +127,7 @@ Before public launch:
 - `VITE_FIREBASE_CONFIG` — required for browser/PWA Google sign-in; JSON for the Firebase **Web app**. The APK's native sign-in uses the root `google-services.json` (mirrored under `android-setup/`) instead.
 - `VITE_FIREBASE_AUTH_DOMAIN` — optional. Use your own domain (proxy `/__/auth/` to `<project>.firebaseapp.com`) so redirect sign-in works in Safari/Chrome builds that block third-party storage.
 - `VITE_API_BASE_URL` — required for every live backend operation in browser and APK. Use the public HTTPS API URL in production and before building the APK; `localhost` is only for local browser development.
+- `VITE_WYBUILD_BILLING_BASE_URL` — optional shared WyBuild billing gateway. Only payment API requests use it; see `WYBUILD-BILLING-INTEGRATION.md`.
 
 Never put private keys, OAuth client secrets, Supabase service-role keys, or the Gemini API key in a `VITE_` variable because frontend values are public.
 

@@ -123,3 +123,10 @@
 .brand-mark.large .brand-glyph{font-size:31px}
 
 .credit-usage-breakdown{border:1px solid #303030;background:#151515;border-radius:15px;padding:14px;margin:14px 0}.credit-usage-title{display:flex;align-items:center;gap:8px;margin-bottom:10px}.credit-usage-title svg{color:#b9a7ff}.credit-usage-title strong{font-size:calc(12px*var(--fs,1))}.credit-usage-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid #292929;font-size:calc(10px*var(--fs,1));color:#aaa}.credit-usage-row strong{color:#eee;text-align:right;max-width:55%}.credit-usage-breakdown>p{font-size:calc(9px*var(--fs,1));line-height:1.65;color:#888;margin:8px 0 0}
+
+/* Blogger destination picker and offline-first status */
+.blogger-site-picker .picker-btn{min-height:46px;padding:12px 13px;border:1px solid #393939;border-radius:12px;background:#171717;color:#f4f4f4;line-height:1.4}
+.blogger-site-picker .picker-btn>span{font-size:13px}
+.offline-banner{position:sticky;top:0;z-index:25;display:flex;align-items:center;gap:9px;padding:10px 16px;background:#292113;border-bottom:1px solid #594323;color:#f2d7a0;font-size:12px;line-height:1.5}
+.offline-dot{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:#e5b85c}
+@media(max-width:760px){.offline-banner{padding:9px 12px;font-size:11px}}
