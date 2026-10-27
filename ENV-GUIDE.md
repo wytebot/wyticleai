@@ -56,3 +56,12 @@ Set `VITE_GOOGLE_WEB_CLIENT_ID` in the frontend build environment (Vercel projec
 `VITE_WYBUILD_BILLING_BASE_URL` is optional. If set, only `/api/billing/*` requests are routed to that HTTPS base URL; AI generation, account data, Blogger OAuth/publishing, Drive, and push registration continue using `VITE_API_BASE_URL`. Set it to the public WyBuild backend origin (no trailing slash), then rebuild the web app/APK. The frontend sends `X-WyBuild-App-Id: wyticle` and `appId: wyticle` on billing requests.
 
 **Important:** this client switch alone does not make an arbitrary WyBuild deployment compatible. WyBuild must expose the same `/api/billing/packs`, `/checkout`, `/authorize`, and `/verify` routes; verify Firebase ID tokens for the same Firebase project (or implement an explicitly trusted identity bridge); scope transactions and entitlements by app ID; and include `app_id: wyticle` in Flutterwave v4 charge metadata so the WyBuild webhook credits the correct Wyticle account exactly once. Never expose Flutterwave, Supabase, Firebase service-account, or webhook secrets in `VITE_*` variables. The webhook URL is configured in the Flutterwave dashboard and is not called by the app directly.
+
+
+## WyBuild shared billing webhook (optional)
+
+To let WyBuild own the registered Flutterwave webhook and forward verified Wyticle payment events, set this **server-side only** variable in Wyticle's backend deployment:
+
+- `WYBUILD_WEBHOOK_SHARED_SECRET`: a long random secret, identical to `WYTICLE_WEBHOOK_SHARED_SECRET` in WyBuild.
+
+In WyBuild's Vercel environment set `WYTICLE_PAYMENT_CONFIRM_URL` to this backend's `/api/wybuild-payment-confirmation` endpoint and set `WYTICLE_WEBHOOK_SHARED_SECRET` to the same value. Never expose this secret in `VITE_` variables or commit it to source control. When using the shared webhook, do not also register Wyticle's direct `/api/billing/webhook` endpoint with Flutterwave.

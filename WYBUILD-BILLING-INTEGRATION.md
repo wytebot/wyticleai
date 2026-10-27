@@ -25,3 +25,8 @@ For every Flutterwave v4 charge, WyBuild must include `meta.app_id = "wyticle"` 
 ## Important boundary
 
 This ZIP prepares Wyticle to select the shared billing origin and identify itself as `wyticle`. It does **not** magically add Wyticle-specific routes or webhook routing to an already-deployed WyBuild backend. That backend must be updated and deployed to satisfy the contract above. Keep all provider secrets on the server and never put them in Vite variables.
+
+
+## WyBuild webhook callback endpoint
+
+The Wyticle backend exposes `POST /api/wybuild-payment-confirmation` for WyBuild's server-to-server webhook relay. Set `WYBUILD_WEBHOOK_SHARED_SECRET` in Wyticle's backend and the matching `WYTICLE_WEBHOOK_SHARED_SECRET` in WyBuild. WyBuild's `WYTICLE_PAYMENT_CONFIRM_URL` must point to this endpoint over HTTPS. The endpoint supports `action: "lookup"` for reference-only Flutterwave events and `action: "settle"` for final events. It never trusts the forwarded status/amount as proof; it matches the stored Wyticle payment and independently fetches/verifies the charge through Flutterwave before granting credits.

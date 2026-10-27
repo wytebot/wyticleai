@@ -143,8 +143,6 @@ function isPrivateAddress(a){if(net.isIPv6(a)){const l=a.toLowerCase();return l=
 async function assertPublicHost(hostname){const h=hostname.replace(/^\[|\]$/g,'');if(net.isIP(h))throw new Error('Use your site domain name, not an IP address.');const addrs=await dns.lookup(h,{all:true});if(!addrs.length||addrs.some(x=>isPrivateAddress(x.address)))throw new Error('That site resolves to a private network address.');}
 async function listSites(uid){const {data,error}=await supabase.from('wryte_connections').select('id,provider,site_url,blog_id,blog_name,created_at').eq('user_id',uid);if(error)throw error;return data||[];}
 app.get('/api/sites',auth,dbRequired,async(req,res)=>{try{res.json({sites:await listSites(req.user.uid)});}catch(e){res.status(500).json({error:'Unable to load connected sites.'});}});
-// Disconnect Blogger publishing without deleting the user's Google Drive archive settings.
-app.delete('/api/connect/blogger',auth,dbRequired,async(req,res)=>{try{const {error}=await supabase.from('wryte_connections').delete().eq('user_id',req.user.uid).eq('provider','blogger');if(error)throw error;res.json({ok:true,connected:false});}catch(e){console.error('Blogger disconnect:',e.message);res.status(500).json({error:'Unable to disconnect Blogger right now.'});}});
 
 // Blogger OAuth: short-lived state is server stored and tied to a verified Firebase user.
 app.post('/api/connect/blogger/start',auth,dbRequired,async(req,res)=>{
@@ -863,6 +861,36 @@ app.post('/api/billing/verify',auth,dbRequired,billingVerifyLimiter,async(req,re
   if(!/^[a-zA-Z0-9_-]{8,80}$/.test(reference))return res.status(400).json({error:'Payment reference format is invalid.'});
   try{const out=await verifyAndCredit(payment);res.status(out.code).json(out.body);}catch(e){console.error('Flutterwave v4 verification:',e.message);res.status(502).json({error:'Could not verify the payment yet. No credits were added; try again.'});}
 });
+// WyBuild shared billing confirmation. The endpoint is protected by a separate high-entropy
+// server-to-server secret; Wyticle still looks up its own order and independently verifies Flutterwave.
+app.post('/api/wybuild-payment-confirmation',async(req,res)=>{
+  const configured=String(process.env.WYBUILD_WEBHOOK_SHARED_SECRET||'');
+  const supplied=String(req.headers['x-wybuild-webhook-secret']||'');
+  if(!configured||!supplied||!safeEqual(supplied,configured))return res.status(401).json({error:'Unauthorized'});
+  if(!supabase)return res.status(503).json({error:'Payment database is unavailable.'});
+  const reference=String(req.body?.reference||'').trim();
+  if(!/^wryte[a-f0-9]{20,40}$/i.test(reference))return res.status(400).json({error:'Invalid Wyticle payment reference.'});
+  const action=String(req.body?.action||'settle');
+  try{
+    const {data:payment,error}=await supabase.from('wryte_payments').select('*').eq('reference',reference).eq('provider','flutterwave-v4').maybeSingle();
+    if(error)throw error;
+    if(!payment)return res.status(404).json({error:'Wyticle payment reference not found.'});
+    if(action==='lookup'){
+      if(!payment.provider_transaction_id)return res.status(202).json({status:'pending',providerChargeId:null});
+      return res.json({ok:true,providerChargeId:String(payment.provider_transaction_id)});
+    }
+    if(action!=='settle')return res.status(400).json({error:'Unsupported action.'});
+    // Check forwarded identifiers as hints only; verifyAndCredit fetches the charge directly from Flutterwave
+    // and checks provider ID, reference, amount, currency, status, and idempotent crediting.
+    if(req.body?.id && payment.provider_transaction_id && String(req.body.id)!==String(payment.provider_transaction_id))
+      return res.status(409).json({error:'Provider transaction ID does not match the stored payment.'});
+    const out=await verifyAndCredit(payment);
+    if(out.code===200)return res.json({ok:true,status:out.body.status||'succeeded',addedCredits:out.body.addedCredits||0,duplicate:!!out.body.duplicate});
+    if(out.code===202)return res.status(202).json({ok:false,status:out.body.status||'pending'});
+    return res.status(out.code).json(out.body);
+  }catch(e){console.error('WyBuild payment confirmation:',e.message);return res.status(500).json({error:'Could not reconcile Wyticle payment yet.'});}
+});
+
 // Optional webhook so credits arrive even if the app is closed mid-payment. Set the same secret hash in the Flutterwave dashboard.
 app.post('/api/billing/webhook',async(req,res)=>{
   const secret=process.env.FLW_V4_WEBHOOK_SECRET_HASH;if(!secret||!supabase||!req.rawBody)return res.status(404).end();
