@@ -147,15 +147,45 @@ app.post('/api/connect/blogger/start',auth,dbRequired,async(req,res)=>{
     const url=new URL('https://accounts.google.com/o/oauth2/v2/auth');url.searchParams.set('client_id',process.env.GOOGLE_OAUTH_CLIENT_ID);url.searchParams.set('redirect_uri',`${API_PUBLIC_URL}/api/connect/blogger/callback`);url.searchParams.set('response_type','code');url.searchParams.set('scope','https://www.googleapis.com/auth/blogger https://www.googleapis.com/auth/drive');url.searchParams.set('access_type','offline');url.searchParams.set('prompt','consent');url.searchParams.set('state',state);res.json({url:url.toString()});
   }catch(e){console.error(e);res.status(500).json({error:'Unable to start Blogger authorization.'});}
 });
+// Saves Google tokens (Drive + every Blogger blog the account can see) for a user. Shared by the redirect callback and the code-exchange endpoint.
+async function saveBloggerConnection(userId,tokens){
+    const oldDrive=await supabase.from('wryte_drive_settings').select('folder_id,refresh_token_enc').eq('user_id',userId).maybeSingle();
+    const driveRow={user_id:userId,folder_id:oldDrive.data?.folder_id||null,access_token_enc:encrypt(tokens.access_token),refresh_token_enc:tokens.refresh_token?encrypt(tokens.refresh_token):(oldDrive.data?.refresh_token_enc||null),token_expiry:tokens.expires_in?new Date(Date.now()+tokens.expires_in*1000).toISOString():null,updated_at:new Date().toISOString()};
+    const driveSave=await supabase.from('wryte_drive_settings').upsert(driveRow,{onConflict:'user_id'});if(driveSave.error)throw driveSave.error;
+    const blogsResp=await fetch('https://www.googleapis.com/blogger/v3/users/self/blogs',{headers:{Authorization:`Bearer ${tokens.access_token}`}});const blogs=await blogsResp.json();if(!blogsResp.ok)throw new Error('Unable to list Blogger blogs');
+    for(const blog of (blogs.items||[])){const row={user_id:userId,provider:'blogger',blog_id:String(blog.id),blog_name:blog.name||'Blogger blog',site_url:blog.url||null,access_token_enc:encrypt(tokens.access_token),refresh_token_enc:tokens.refresh_token?encrypt(tokens.refresh_token):undefined,token_expiry:tokens.expires_in?new Date(Date.now()+tokens.expires_in*1000).toISOString():null};const existing=await supabase.from('wryte_connections').select('id').eq('user_id',userId).eq('provider','blogger').eq('blog_id',String(blog.id)).maybeSingle();if(existing.data)await supabase.from('wryte_connections').update(row).eq('id',existing.data.id);else await supabase.from('wryte_connections').insert(row);}
+    return (blogs.items||[]).length;
+}
+const BLOGGER_SCOPES=['https://www.googleapis.com/auth/blogger','https://www.googleapis.com/auth/drive'];
+app.get('/api/connect/blogger/config',auth,(req,res)=>{
+  const clientId=process.env.GOOGLE_OAUTH_CLIENT_ID;if(!clientId)return res.status(503).json({error:'Blogger OAuth setup missing: GOOGLE_OAUTH_CLIENT_ID'});
+  res.json({clientId,scopes:BLOGGER_SCOPES});
+});
+// Exchanges a Google authorization code from the in-page Google popup (web) or the native Android account chooser for tokens. No redirect URI is involved.
+app.post('/api/connect/blogger/exchange',auth,dbRequired,async(req,res)=>{
+  const missing=requiredEnv(['GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET','TOKEN_ENCRYPTION_KEY']);if(missing.length)return res.status(503).json({error:`Blogger OAuth setup missing: ${missing.join(', ')}`});
+  const code=String(req.body?.code||'').trim();const source=req.body?.source==='android'?'android':'web';
+  if(!code||code.length>2048)return res.status(400).json({error:'Missing Google authorization code.'});
+  try{
+    const params={code,client_id:process.env.GOOGLE_OAUTH_CLIENT_ID,client_secret:process.env.GOOGLE_OAUTH_CLIENT_SECRET,grant_type:'authorization_code'};
+    if(source==='web')params.redirect_uri='postmessage'; // required for codes issued by the Google Identity Services popup; Android server auth codes use none
+    const tokenResp=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(params)});
+    const tokens=await tokenResp.json().catch(()=>({}));
+    if(!tokenResp.ok||!tokens.access_token){
+      console.error('Blogger code exchange failed:',source,tokens.error,tokens.error_description);
+      const hint=tokens.error==='invalid_client'||tokens.error==='unauthorized_client'?'The Google OAuth client on the server does not match the one the app signed in with. Use the same Web client ID and secret for GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET (see ENV-GUIDE).':'Google rejected the sign-in code. Please try connecting again.';
+      return res.status(400).json({error:hint});
+    }
+    if(!String(tokens.scope||'').includes('auth/blogger'))return res.status(400).json({error:'Blogger permission was not granted. Tick the Blogger access box when Google asks, then try again.'});
+    const blogCount=await saveBloggerConnection(req.user.uid,tokens);
+    res.json({ok:true,blogs:blogCount});
+  }catch(e){console.error('Blogger code exchange:',e.message);res.status(502).json({error:'Unable to finish connecting Blogger. Please try again.'});}
+});
 app.get('/api/connect/blogger/callback',async(req,res)=>{
   const {code,state,error:oauthError}=req.query;if(oauthError)return res.redirect(`${APP_URL}/?connect=blogger_failed`);if(typeof code!=='string'||typeof state!=='string')return res.status(400).send('Invalid OAuth callback.');
   try{if(!supabase)throw new Error('Database not configured');const hash=crypto.createHash('sha256').update(state).digest('hex');const {data:st,error}=await supabase.from('wryte_oauth_states').select('*').eq('state_hash',hash).eq('provider','blogger').gt('expires_at',new Date().toISOString()).maybeSingle();if(error||!st) return res.status(400).send('OAuth state expired or invalid. Return to Wyticle AI and connect again.');const returnUrl=st.return_url||APP_URL;await supabase.from('wryte_oauth_states').delete().eq('state_hash',hash);
     const tokenResp=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({code,client_id:process.env.GOOGLE_OAUTH_CLIENT_ID,client_secret:process.env.GOOGLE_OAUTH_CLIENT_SECRET,redirect_uri:`${API_PUBLIC_URL}/api/connect/blogger/callback`,grant_type:'authorization_code'})});const tokens=await tokenResp.json();if(!tokenResp.ok||!tokens.access_token)throw new Error('Google token exchange failed');
-    const oldDrive=await supabase.from('wryte_drive_settings').select('folder_id,refresh_token_enc').eq('user_id',st.user_id).maybeSingle();
-    const driveRow={user_id:st.user_id,folder_id:oldDrive.data?.folder_id||null,access_token_enc:encrypt(tokens.access_token),refresh_token_enc:tokens.refresh_token?encrypt(tokens.refresh_token):(oldDrive.data?.refresh_token_enc||null),token_expiry:tokens.expires_in?new Date(Date.now()+tokens.expires_in*1000).toISOString():null,updated_at:new Date().toISOString()};
-    const driveSave=await supabase.from('wryte_drive_settings').upsert(driveRow,{onConflict:'user_id'});if(driveSave.error)throw driveSave.error;
-    const blogsResp=await fetch('https://www.googleapis.com/blogger/v3/users/self/blogs',{headers:{Authorization:`Bearer ${tokens.access_token}`}});const blogs=await blogsResp.json();if(!blogsResp.ok)throw new Error('Unable to list Blogger blogs');
-    for(const blog of (blogs.items||[])){const row={user_id:st.user_id,provider:'blogger',blog_id:String(blog.id),blog_name:blog.name||'Blogger blog',site_url:blog.url||null,access_token_enc:encrypt(tokens.access_token),refresh_token_enc:tokens.refresh_token?encrypt(tokens.refresh_token):undefined,token_expiry:tokens.expires_in?new Date(Date.now()+tokens.expires_in*1000).toISOString():null};const existing=await supabase.from('wryte_connections').select('id').eq('user_id',st.user_id).eq('provider','blogger').eq('blog_id',String(blog.id)).maybeSingle();if(existing.data)await supabase.from('wryte_connections').update(row).eq('id',existing.data.id);else await supabase.from('wryte_connections').insert(row);}
+    await saveBloggerConnection(st.user_id,tokens);
     res.redirect(returnUrl.startsWith('ai.wryte.app:')?`${returnUrl}${returnUrl.includes('?')?'&':'?'}connect=blogger_success`:`${returnUrl.replace(/\/$/,'')}/?connect=blogger_success`);
   }catch(e){console.error('Blogger OAuth callback:',e.message);res.redirect(`${APP_URL}/?connect=blogger_failed`);}
 });
@@ -379,11 +409,12 @@ const creditsForUsd=(usd)=>{const p=pricing();return Math.max(1,Math.ceil(usd*p.
 const imageCredits=()=>Number(process.env.IMAGE_CREDIT_COST)||creditsForUsd(pricing().image);
 // Gemini counts "thinking" tokens against maxOutputTokens, so leave headroom or JSON can be cut off mid-way.
 const OUTPUT_HEADROOM=3000;
-const maxOutTokens=(action)=>action==='diagnose'?1500+OUTPUT_HEADROOM:Math.min(16000,envNum('MAX_OUTPUT_TOKENS',9000)+OUTPUT_HEADROOM);
-// Live research (Google Search grounding) is a single extra request. It is skipped for diagnosis, fixes and plain-writing documents.
+const maxOutTokens=(action)=>action==='diagnose'?2500+OUTPUT_HEADROOM:Math.min(16000,envNum('MAX_OUTPUT_TOKENS',9000)+OUTPUT_HEADROOM);
+// Live research / fact-check (Google Search grounding) is a single extra request. Diagnosis always fact-checks; fixes and plain-writing documents skip it.
 const RESEARCH_DOC_TYPES=new Set(['report','businessPlan','proposal','pressRelease','productDescription']);
 const searchLimit=(action,docType='article')=>{
-  if(process.env.ENABLE_WEB_SEARCH==='false'||['diagnose','fix'].includes(action))return 0;
+  if(process.env.ENABLE_WEB_SEARCH==='false'||action==='fix')return 0;
+  if(action==='diagnose')return PRICING_CONFIG.maxSearchCalls; // the live fact-check applies to every project type
   if(docType&&docType!=='article'&&!RESEARCH_DOC_TYPES.has(docType))return 0;
   return PRICING_CONFIG.maxSearchCalls;
 };
@@ -502,6 +533,24 @@ async function researchTopic({topic,niche,country,instruction}){
       validate:async(payload,model)=>{const {candidate,text}=readCandidate(payload,{allowTruncated:true});if(text.trim().length<200)throw invalidOutput('research notes too short');return {notes:text.trim().slice(0,9000),sources:await groundingSources(candidate),usage:usageOf(payload,model,{searchCalls:1})};}
     });
   }catch(e){console.warn('[research] skipped:',e.log||e.message);return null;}
+}
+// Diagnosis step: one grounded request verifies the external facts in the content. Failure is non-fatal: the audit still runs without live checks.
+const FACT_LABELS={article:'article',letter:'letter',email:'email',resume:'resume',coverLetter:'cover letter',proposal:'proposal',report:'report',businessPlan:'business plan',meetingMinutes:'meeting minutes',socialPost:'social media post',productDescription:'product description',pressRelease:'press release'};
+function parseFactChecks(text){
+  return String(text||'').split('\n').map(l=>l.trim().replace(/\*\*/g,'').replace(/^[-*\d.)\s]+(?=CLAIM:)/i,'')).filter(l=>/^CLAIM:/i.test(l)).map(l=>{
+    const m=/^CLAIM:\s*(.*?)\s*\|\s*VERDICT:\s*(SUPPORTED|PARTLY|WRONG|UNVERIFIED)\b[^|]*\|\s*NOTE:\s*(.*)$/i.exec(l);
+    return m?{claim:m[1].slice(0,300),verdict:m[2].toUpperCase(),note:m[3].slice(0,400)}:null;
+  }).filter(Boolean).slice(0,10);
+}
+async function factCheckContent({title,docType,country,text}){
+  const label=FACT_LABELS[docType]||'document';
+  const prompt=`Fact-check this ${label} using Google Search.\nCheck only external, verifiable facts: statistics and figures, dates, prices, laws and regulations, named studies, organisations, products, public figures, and scientific or technical statements. Do NOT check opinions, advice, plans, or personal and internal details (the sender's or recipient's names, a resume's jobs and education, meeting attendees, the author's own numbers); these cannot be verified, so ignore them. Ignore [placeholders].\nCountry/market context: ${country||'not specified'}\nReturn at most 10 lines, most important first, one claim per line, in exactly this format:\nCLAIM: <the claim, closely quoted, at most 25 words> | VERDICT: <SUPPORTED or PARTLY or WRONG or UNVERIFIED> | NOTE: <one sentence on what reliable sources say; when PARTLY or WRONG give the correct fact, figure or date with its year>\nUse WRONG only when search results clearly contradict the claim; use UNVERIFIED when you cannot find reliable evidence. If there are no checkable external facts, return exactly: NO CHECKABLE CLAIMS\n\nTITLE: ${title}\nCONTENT:\n${String(text||'').slice(0,12000)}`;
+  try{
+    return await runGemini({models:textModels(),attempts:2,timeoutMs:80000,
+      buildBody:()=>({systemInstruction:{parts:[{text:'You are a meticulous fact-checker. Base every verdict on Google Search results and be explicit about uncertainty. Never invent evidence.'}]},contents:[{role:'user',parts:[{text:prompt}]}],tools:[{google_search:{}}],generationConfig:{maxOutputTokens:4000,temperature:0.1}}),
+      validate:async(payload,model)=>{const {candidate,text:out}=readCandidate(payload,{allowTruncated:true});if(out.trim().length<12)throw invalidOutput('fact-check too short');return {notes:out.trim().slice(0,8000),sources:await groundingSources(candidate),usage:usageOf(payload,model,{searchCalls:1})};}
+    });
+  }catch(e){console.warn('[fact-check] skipped:',e.log||e.message);return null;}
 }
 // Image generation uses Gemini's native image models. Aspect ratio is optional: if a model rejects it, retry without.
 async function generateImageWithGemini(prompt){
@@ -624,14 +673,15 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
     // Step 1 (optional): live research with Google Search grounding.
     const researchEnabled=searchLimit(action,docType)>0;
     let research=null;
-    if(researchEnabled)research=await researchTopic({topic:`${title}${brief.style?` — ${String(brief.style).slice(0,600)}`:''}`,niche,country:brief.country,instruction});
+    if(researchEnabled&&isDiagnosis)research=await factCheckContent({title,docType,country:brief.country,text:htmlToText(existing)});
+    else if(researchEnabled)research=await researchTopic({topic:`${title}${brief.style?` — ${String(brief.style).slice(0,600)}`:''}`,niche,country:brief.country,instruction});
     const researchBlock=research?.notes?`\n\nRESEARCH NOTES (live Google Search results; the only permitted source for specific figures, dates, prices, laws and named studies):\n${research.notes}`:'';
 
     // Step 2: write / revise / audit.
     let userTask,schema,hint,temperature=0.7;
     if(isDiagnosis){
       schema=diagnosisSchema;hint=SCHEMA_HINT.diagnosis;temperature=0.2;
-      userTask=`Audit this ${docType==='article'?'article':docType} like a demanding senior editor. Return a realistic score from 0-100 (reserve 90+ for genuinely excellent work; most drafts score 60-85) and 4-8 concise, prioritized, actionable findings, most important first. Each finding must name the specific problem and how to fix it.\nCheck: does it fulfil the brief and intended outcome; completeness; unsupported or doubtful claims; genre conventions and layout; clarity, tone, audience fit, structure, readability, grammar and consistency. Articles: also search intent, title/heading structure, keyword naturalness, depth and source support. Letters/emails: sender/recipient context, tone, clear ask, closing. Resumes: ATS readability, evidence-backed achievements, missing factual details (never suggest inventing credentials). Proposals/plans: scope, deliverables, timeline, assumptions, risks, feasibility. Reports: evidence, findings, recommendations. Minutes: decisions, owners, deadlines. Social/product/press: platform fit, truthful claims, required facts.\nDo NOT rewrite the content.\n\nTitle: ${title}\nBrief: ${JSON.stringify(brief)}\n\nCONTENT TO AUDIT (HTML):\n${existing}`;
+      userTask=`Audit this ${docType==='article'?'article':docType} like a demanding senior editor. Return a realistic score from 0-100 (reserve 90+ for genuinely excellent work; most drafts score 60-85) and 4-8 concise, prioritized, actionable findings, most important first. Each finding must name the specific problem and how to fix it.\nCheck: does it fulfil the brief and intended outcome; completeness; unsupported or doubtful claims; genre conventions and layout; clarity, tone, audience fit, structure, readability, grammar and consistency. Articles: also search intent, title/heading structure, keyword naturalness, depth and source support. Letters/emails: sender/recipient context, tone, clear ask, closing. Resumes: ATS readability, evidence-backed achievements, missing factual details (never suggest inventing credentials). Proposals/plans: scope, deliverables, timeline, assumptions, risks, feasibility. Reports: evidence, findings, recommendations. Minutes: decisions, owners, deadlines. Social/product/press: platform fit, truthful claims, required facts.\nFactual accuracy counts toward the score. Do NOT rewrite the content.${research?.notes?`\n\nFACT-CHECK RESULTS (live Google Search). Turn every WRONG or PARTLY item into a finding that names the claim and states the correct fact; never contradict these results and never call a claim wrong unless they say so; mention UNVERIFIED items briefly only if they are important:\n${research.notes}`:`\n\nThe live fact-check was unavailable. Flag specific claims that need a source, but do not assert that any claim is false.`}\n\nTitle: ${title}\nBrief: ${JSON.stringify(brief)}\n\nCONTENT TO AUDIT (HTML):\n${existing}`;
     }else{
       schema=isDocument?documentSchema:contentSchema;hint=isDocument?SCHEMA_HINT.document:SCHEMA_HINT.content;
       const brief_lines=`Output type: ${isDocument?docType:'article'}\nTitle/purpose: ${brief.title||project?.title||''}\nRequested style and instructions: ${brief.style||'(none)'}\nRecipient: ${brief.recipient||'not supplied'}\nSender: ${brief.sender||'not supplied'}\nOrganization: ${brief.organization||'not supplied'}\nDate: ${brief.date||'not supplied'}\nAudience / target role: ${brief.audience||'infer only when safe'}\nCountry: ${brief.country||'not specified'}\nNiche: ${niche||'not applicable'}\nLength: ${isDocument?docLengthLine(docType):(brief.length||'appropriate for the topic')}\nPurpose and key requirements: ${brief.purpose||'as described above'}\nAdditional information: ${brief.additional||'none'}`;
@@ -641,7 +691,7 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
       }else if(action==='revision'){
         userTask=`Revise the existing content according to the requested changes. Return the COMPLETE updated content, not a diff or a summary. Apply the change thoroughly everywhere it applies, keep everything the user did not ask to change (facts, structure, voice, length), and keep the same output type.\nREQUESTED CHANGES: ${instruction}\n\n${brief_lines}\n\nGUIDANCE: ${guidance}${researchBlock}\n\nEXISTING CONTENT (HTML):\n${existing}`;
       }else{
-        userTask=`Improve the existing content so it better fulfils its brief: fix clarity, structure, flow, tone, grammar, weak or generic passages, and gaps against the brief. Do not add unsupported facts and do not remove accurate content. Return the COMPLETE improved content in the same output type.${instruction?`\nExtra focus: ${instruction}`:''}\n\n${brief_lines}\n\nGUIDANCE: ${guidance}\n\nEXISTING CONTENT (HTML):\n${existing}`;
+        userTask=`Improve the existing content so it better fulfils its brief: fix clarity, structure, flow, tone, grammar, weak or generic passages, and gaps against the brief. Do not add unsupported facts and do not remove accurate content. Return the COMPLETE improved content in the same output type. If the extra focus lists fact-check corrections, apply each correction exactly (they come from live Google Search) and keep everything else.${instruction?`\nExtra focus: ${instruction}`:''}\n\n${brief_lines}\n\nGUIDANCE: ${guidance}\n\nEXISTING CONTENT (HTML):\n${existing}`;
       }
     }
     userTask+=`\n\nReturn ONLY JSON in exactly this shape: ${hint}`;
@@ -661,7 +711,7 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
     const usage={inputTokens:generated.usage.inputTokens+(research?.usage.inputTokens||0),outputTokens:generated.usage.outputTokens+(research?.usage.outputTokens||0),searchCalls:research?1:0,model:generated.usage.model,researchModel:research?.usage.model||null,provider:'gemini'};
     let result;
     if(isDiagnosis){
-      result={diagnosis:{score:Math.max(0,Math.min(100,Math.round(Number(parsed.diagnosis.score)))),findings:parsed.diagnosis.findings.map(x=>String(x).trim()).filter(Boolean).slice(0,10)}};
+      result={diagnosis:{score:Math.max(0,Math.min(100,Math.round(Number(parsed.diagnosis.score)))),findings:parsed.diagnosis.findings.map(x=>String(x).trim()).filter(Boolean).slice(0,10),factChecked:Boolean(research),factChecks:research?parseFactChecks(research.notes):[],sources:(research?.sources||[]).slice(0,6)}};
     }else{
       const finalTitle=String(parsed.title||title||'Untitled').trim().slice(0,200);
       const html=normalizeHtml(parsed.html,{title:finalTitle,article:!isDocument});

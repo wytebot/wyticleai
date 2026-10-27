@@ -109,3 +109,23 @@ database functions and live Flutterwave/Blogger/OpenAI flows could not be exerci
 - `ilemobayotolulope11092003@gmail.com` skips all credit billing: AI writing, revisions, fixes, diagnosis and featured images. Credits are never reserved or charged and the credits screen shows Unlimited.
 - Enforced on the server only, and only when the Google account's email is verified (the client cannot grant it). Extra accounts: `BILLING_BYPASS_EMAILS=a@x.com,b@y.com` in the server environment.
 - Blogger OAuth redirect URI: `<API_PUBLIC_URL>/api/connect/blogger/callback` (API_PUBLIC_URL must be your real https domain, no trailing slash; it defaults to localhost, which causes redirect_uri_mismatch).
+
+## Blogger / Drive connection without redirects
+- **Browser:** "Connect Blogger" now opens a Google popup (Google Identity Services code flow) and sends the returned code to `POST /api/connect/blogger/exchange`. There is no redirect URI, so `redirect_uri_mismatch` can no longer happen on the web.
+- **Android APK:** "Connect Blogger" first shows the native Google account chooser (`FirebaseAuthentication.signInWithGoogle` with the Blogger + Drive scopes) and sends its server auth code to the same endpoint. If the plugin does not return a server auth code on a device, the app falls back to the old browser flow automatically. Check `adb logcat | grep "serverAuthCode"` if it keeps falling back.
+- The old redirect flow (`/api/connect/blogger/start` + `/callback`) is kept as the fallback.
+
+### One-time Google Cloud setup (use ONE Web OAuth client for everything)
+Use the Firebase "Web client (auto created by Google Service)" (client ID `589252246114-pdlhe9mbu5u80p554039bdp4pp1e3ada.apps.googleusercontent.com`, found in google-services.json as the type-3 client).
+1. Google Cloud Console -> APIs & Services -> Credentials -> that Web client.
+2. Set server env `GOOGLE_OAUTH_CLIENT_ID` to that ID and `GOOGLE_OAUTH_CLIENT_SECRET` to its secret (shown on the client page). The code exchange only works when the app and server use the same client.
+3. Authorized JavaScript origins: add your site origin, for example `https://your-app.vercel.app` (needed for browser sign-in and the Blogger popup).
+4. Authorized redirect URIs (only needed for the fallback flow): `https://your-app.vercel.app/api/connect/blogger/callback`, and set `API_PUBLIC_URL=https://your-app.vercel.app`.
+5. APIs & Services -> Library: enable Blogger API v3 and Google Drive API. On the OAuth consent screen add the Blogger and Drive scopes; while the app is in Testing mode, add your Google account under Test users.
+
+## Diagnose: visible report, live fact-check for every project type, Fix button
+- The diagnosis report now opens as a pop-up the moment it is ready (it used to appear at the very bottom of the page, below the whole draft, so it looked like nothing happened). It stays available inline too.
+- If the server returns no diagnosis the app now shows an error instead of made-up placeholder findings.
+- Diagnosis now runs a live Google Search fact-check for all 12 project types (article, letter, email, resume, cover letter, proposal, report, business plan, meeting minutes, social post, product description, press release). Only external facts are checked (figures, dates, laws, prices, studies, organisations); personal details, resume history and attendees are ignored because they cannot be verified. Each claim is labelled Verified / Partly correct / Incorrect / Unverified with the correct fact and its sources. If the fact-check fails, the audit still runs and says so.
+- "Fix issues" is in the report pop-up, in the report card, and next to the Diagnose button once a report exists. It sends every finding plus the verified corrections to the fix action, which is told to apply them exactly.
+- Billing: the fact-check is one grounded search request, included in the diagnosis reservation and settled on actual usage. Set `ENABLE_WEB_SEARCH=false` to turn live checks off.

@@ -99,3 +99,20 @@
  .app-shell{box-sizing:border-box;min-height:100dvh;padding-top:max(28px,env(safe-area-inset-top));padding-bottom:max(12px,env(safe-area-inset-bottom));}
  input,textarea{ -webkit-text-size-adjust:100%; }
 }
+
+/* diagnosis report + fact check */
+.diagnosis-modal{max-height:78svh;overflow-y:auto;overscroll-behavior:contain;margin:-8px}
+.diagnosis-modal .diagnosis-card{margin:0;border:0;background:transparent;padding:8px}
+.fact-title{margin:16px 0 6px;font-size:calc(12px*var(--fs,1));letter-spacing:.8px;text-transform:uppercase;color:#bbb}
+.diagnosis-card .fact-list{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:8px}
+.fact{display:flex;gap:10px;align-items:flex-start;padding:10px;border:1px solid #2c2c2c;border-radius:12px;background:#0d0d0d;margin:0}
+.fact strong{display:block;font-size:calc(12px*var(--fs,1));color:#e6e6e6;font-weight:600}
+.fact small{display:block;margin-top:3px;font-size:calc(11px*var(--fs,1));color:#999;line-height:1.5}
+.fact-chip{flex:0 0 auto;font-size:calc(10px*var(--fs,1));font-weight:700;padding:3px 8px;border-radius:99px;border:1px solid #444;color:#ccc;white-space:nowrap}
+.fact-supported .fact-chip{border-color:#2f6b45;color:#7fd69f}
+.fact-partly .fact-chip{border-color:#7a6a2a;color:#e3c565}
+.fact-wrong .fact-chip{border-color:#7a3030;color:#ff8f8f}
+.fact-none{font-size:calc(11px*var(--fs,1));color:#888;margin:12px 0 0}
+.fact-sources{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:14px 0 4px;font-size:calc(11px*var(--fs,1));color:#888}
+.fact-sources a{color:#9bbcff;text-decoration:underline;overflow-wrap:anywhere}
+.diagnosis-card .full-btn{margin-top:14px}
