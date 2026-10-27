@@ -74,6 +74,10 @@ const GEMINI_IMAGE_MODEL=process.env.GEMINI_IMAGE_MODEL||'gemini-3.1-flash-image
 const GEMINI_IMAGE_FALLBACK_MODELS=splitList(process.env.GEMINI_IMAGE_FALLBACK_MODELS||'gemini-2.5-flash-image');
 const APP_URL=(process.env.APP_URL||'http://localhost:5173').replace(/\/$/,'');
 const API_PUBLIC_URL=(process.env.API_PUBLIC_URL||'http://localhost:8787').replace(/\/$/,'');
+// Owner accounts that skip all credit billing (AI text, revisions, diagnosis and images). Matching is server-side only and requires a Google-verified email.
+// Add more with BILLING_BYPASS_EMAILS=a@x.com,b@y.com
+const BILLING_BYPASS_EMAILS=new Set(['ilemobayotolulope11092003@gmail.com',...String(process.env.BILLING_BYPASS_EMAILS||'').split(',')].map(e=>e.trim().toLowerCase()).filter(Boolean));
+const isBillingExempt=(user)=>Boolean(user?.emailVerified&&user.email&&BILLING_BYPASS_EMAILS.has(String(user.email).trim().toLowerCase()));
 
 function requiredEnv(names){return names.filter(n=>!process.env[n]);}
 function encrypt(text){
@@ -93,7 +97,7 @@ async function auth(req,res,next){
     const header=req.headers.authorization||''; const token=header.startsWith('Bearer ')?header.slice(7):'';
     if(!token) return res.status(401).json({error:'Sign in to continue.'});
     if(!firebaseReady) return res.status(503).json({error:'Server authentication is not configured. Set FIREBASE_SERVICE_ACCOUNT_JSON.'});
-    const decoded=await admin.auth().verifyIdToken(token,true); req.user={uid:decoded.uid,email:decoded.email||'',name:decoded.name||'',picture:decoded.picture||''}; next();
+    const decoded=await admin.auth().verifyIdToken(token,true); req.user={uid:decoded.uid,email:decoded.email||'',emailVerified:decoded.email_verified===true,name:decoded.name||'',picture:decoded.picture||''}; next();
   }catch(e){
     // Only a bad/expired/revoked token is the user's problem (401). A Firebase Admin or network failure must not log everyone out.
     const code=String(e?.code||'');
@@ -130,7 +134,7 @@ app.post('/api/push/register',auth,async(req,res)=>{
 });
 app.delete('/api/push/register',auth,async(req,res)=>{const token=String(req.body?.token||'').trim();if(!token)return res.status(400).json({error:'Push token is required.'});try{await deactivatePushDevice(req.user.uid,token);res.json({ok:true});}catch(e){res.status(503).json({error:'Unable to unregister this device.'});}});
 
-app.get('/api/me',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({user:req.user,wallet:{credits:w.credits,freeGenerationsRemaining:Math.max(0,2-(w.free_generations_used||0))},connectedSites:await listSites(req.user.uid)});}catch(e){console.error(e);res.status(500).json({error:'Unable to load your account.'});}});
+app.get('/api/me',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({user:req.user,wallet:{credits:w.credits,freeGenerationsRemaining:Math.max(0,2-(w.free_generations_used||0)),unlimited:isBillingExempt(req.user)},connectedSites:await listSites(req.user.uid)});}catch(e){console.error(e);res.status(500).json({error:'Unable to load your account.'});}});
 function isPrivateAddress(a){if(net.isIPv6(a)){const l=a.toLowerCase();return l==='::1'||l==='::'||l.startsWith('fc')||l.startsWith('fd')||l.startsWith('fe8')||l.startsWith('fe9')||l.startsWith('fea')||l.startsWith('feb')||l.startsWith('::ffff:');}const [x,y]=a.split('.').map(Number);return x===0||x===10||x===127||(x===100&&y>=64&&y<=127)||(x===169&&y===254)||(x===172&&y>=16&&y<=31)||(x===192&&y===168)||x>=224;}
 async function assertPublicHost(hostname){const h=hostname.replace(/^\[|\]$/g,'');if(net.isIP(h))throw new Error('Use your site domain name, not an IP address.');const addrs=await dns.lookup(h,{all:true});if(!addrs.length||addrs.some(x=>isPrivateAddress(x.address)))throw new Error('That site resolves to a private network address.');}
 async function listSites(uid){const {data,error}=await supabase.from('wryte_connections').select('id,provider,site_url,blog_id,blog_name,created_at').eq('user_id',uid);if(error)throw error;return data||[];}
@@ -528,7 +532,7 @@ function estimateCredits({action,brief={}}){if(action==='image')return imageCred
 const inputGuess=PRICING_CONFIG.maxInputTokensEstimate;return creditsForUsd(costUsd({input:inputGuess,output:maxOutTokens(action),searches:searchLimit(action,brief?.documentType)}));}
 async function debitBefore(uid,{action,projectId,brief}){const units=estimateCredits({action,brief});const {data,error}=await supabase.rpc('wryte_reserve_usage',{p_user_id:uid,p_action:action,p_project_id:projectId||null,p_estimated_credits:units});if(error)throw new Error('Credit service unavailable. Try again later.');if(!data?.ok) {const e=new Error(data?.error||'Not enough credits. Purchase a credit pack to continue.');e.status=402;throw e;}return {reservationId:data.reservation_id,units:data.reserved_credits||0,free:data.free||false};}
 async function settleUsage(reservationId,uid,usage,action,projectId){const actual=creditsForUsd(costUsd({input:Number(usage?.inputTokens||0),output:Number(usage?.outputTokens||0),searches:Number(usage?.searchCalls||0)}));const {data,error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservationId,p_user_id:uid,p_actual_credits:actual,p_usage:usage||{},p_action:action,p_project_id:projectId||null});if(error||data?.ok===false)throw new Error('Could not settle usage. Contact support before retrying.');return data;}
-app.get('/api/credits',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({credits:w.credits||0,freeGenerationsRemaining:Math.max(0,2-(w.free_generations_used||0)),unit:'credits'});}catch(e){res.status(500).json({error:'Unable to load credit balance.'});}});
+app.get('/api/credits',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({credits:w.credits||0,freeGenerationsRemaining:Math.max(0,2-(w.free_generations_used||0)),unit:'credits',unlimited:isBillingExempt(req.user)});}catch(e){res.status(500).json({error:'Unable to load credit balance.'});}});
 // ---- Output post-processing: derive plain text / word count server-side so the model only writes each thing once ----
 const escHtmlSrv=(s='')=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const htmlToText=(h)=>String(h||'').replace(/<(script|style)[\s\S]*?<\/\1>/gi,' ').replace(/<br\s*\/?>|<\/(p|div|h[1-6]|li|tr|blockquote)>/gi,'\n').replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').replace(/[ \t]+/g,' ').replace(/ ?\n ?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
@@ -605,7 +609,9 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
     const wallet=await ensureWallet(req.user.uid);const targetProject=projectId||project?.id||crypto.randomUUID();
     // Free trial follow-ups are reserved atomically in PostgreSQL. A failed request releases the slot.
     const trialIds=wallet.trial_project_ids||[];const trialProject=trialIds.includes(targetProject);
-    if(action!=='initial'&&action!=='document'&&trialProject){
+    const exempt=isBillingExempt(req.user);
+    if(exempt){reservation=null;}
+    else if(action!=='initial'&&action!=='document'&&trialProject){
       const {data:trial,error:trialError}=await supabase.rpc('wryte_reserve_trial_followup',{p_user_id:req.user.uid,p_project_id:targetProject,p_action:action,p_limit:PRICING_CONFIG.trialFollowupLimit});
       if(trialError)throw new Error('Credit service unavailable. Try again later.');
       if(trial?.ok)reservation={free:true,reservationId:trial.reservation_id,units:0};
@@ -671,7 +677,7 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
     if(reservation?.reservationId)await settleUsage(reservation.reservationId,req.user.uid,usage,action,targetProject);
     else if(reservation?.free&&action==='initial'){const {error}=await supabase.rpc('wryte_register_trial_project',{p_user_id:req.user.uid,p_project_id:targetProject});if(error)throw new Error('Could not save free article entitlement. Please contact support.');}
     const updated=await ensureWallet(req.user.uid);
-    result.billing={credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0)),chargedCredits:reservation?.free?0:undefined,projectId:targetProject};
+    result.billing={credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0)),chargedCredits:(reservation?.free||exempt)?0:undefined,unlimited:exempt,projectId:targetProject};
     result.documentType=docType;
     sendPushToUser(req.user.uid,{title:isDiagnosis?'Your content check is ready':'Your content is ready',body:isDiagnosis?'Wyticle AI finished checking your content.':'Wyticle AI finished generating your content.',type:'generation_complete',projectId:targetProject});
     res.json(result);
@@ -690,12 +696,12 @@ app.post('/api/image',auth,dbRequired,async(req,res)=>{
     const {projectId,title,niche,style,details=''}=req.body||{};if(!projectId||!title)return res.status(400).json({error:'Article project and title are required.'});
     await ensureWallet(req.user.uid);
     // Image generation is a separately priced premium operation to protect margins; users can still upload their own image for free.
-    reservation=await debitBefore(req.user.uid,{action:'image',projectId,brief:{length:'image'}});
+    reservation=isBillingExempt(req.user)?null:await debitBefore(req.user.uid,{action:'image',projectId,brief:{length:'image'}});
     const prompt=`Create a polished, original editorial featured image for a blog article, 16:9 landscape. Topic: ${String(title).slice(0,500)}. Niche: ${String(niche||'general').slice(0,120)}. Visual style requested: ${String(style||'professional, clear, modern').slice(0,300)}. Additional context: ${String(details).slice(0,500)}. Composition should be high quality, readable at blog thumbnail size, with a clear focal subject. Absolutely no text, letters, numbers, logos, watermarks or brand marks anywhere in the image. Do not create misleading depictions for medical, financial, political, or news claims.`;
     const img=await generateImageWithGemini(prompt);
     if(reservation?.reservationId){const {error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid,p_actual_credits:imageCredits(),p_usage:{imageModel:img.model,provider:'gemini'},p_action:'image',p_project_id:projectId});if(error)throw new Error('Could not settle image usage.');}
     const mime=/^image\/(png|jpeg|webp|gif)$/i.test(img.mime)?img.mime.toLowerCase():'image/png';
-    const updated=await ensureWallet(req.user.uid);res.json({dataUrl:`data:${mime};base64,${img.b64}`,credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0))});
+    const updated=await ensureWallet(req.user.uid);res.json({dataUrl:`data:${mime};base64,${img.b64}`,credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0)),unlimited:isBillingExempt(req.user)});
   }catch(e){
     if(reservation?.reservationId){try{await supabase.rpc('wryte_release_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid});}catch{}}
     console.error('Image generation:',e.log||e.message);

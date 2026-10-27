@@ -104,3 +104,8 @@ database functions and live Flutterwave/Blogger/OpenAI flows could not be exerci
 - When Gemini returns unusable output (too short, truncated, "rest unchanged" placeholders) the retry now tells it exactly what was wrong. Revisions and fixes are rejected and retried if they silently drop most of the content. Stray markdown bold is converted to HTML.
 - Article length floor raised to 85% of the requested minimum; article guidance adds audience/country fit, tables/checklists and anti-repetition rules.
 - Tip: set `GEMINI_THINKING_LEVEL=medium` (or `high`) on the server for the best quality; it uses more output tokens, so check your credit pricing.
+
+## Owner billing bypass
+- `ilemobayotolulope11092003@gmail.com` skips all credit billing: AI writing, revisions, fixes, diagnosis and featured images. Credits are never reserved or charged and the credits screen shows Unlimited.
+- Enforced on the server only, and only when the Google account's email is verified (the client cannot grant it). Extra accounts: `BILLING_BYPASS_EMAILS=a@x.com,b@y.com` in the server environment.
+- Blogger OAuth redirect URI: `<API_PUBLIC_URL>/api/connect/blogger/callback` (API_PUBLIC_URL must be your real https domain, no trailing slash; it defaults to localhost, which causes redirect_uri_mismatch).
