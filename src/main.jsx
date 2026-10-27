@@ -12,22 +12,28 @@ import { jsPDF } from 'jspdf';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { initializeApp } from 'firebase/app';
+import androidFirebaseConfig from '../google-services.json';
 import { getAuth, GoogleAuthProvider, signInWithRedirect, signInWithPopup, signInWithCredential, getRedirectResult, onAuthStateChanged } from 'firebase/auth';
 import { Activity, Download, RefreshCw, ArrowLeft, ArrowRight, ArrowDown, ArrowUp, BookOpen, Bold, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3, CloudUpload, FileText, Globe, Heading, ImagePlus, Italic, Link as LinkIcon, List, ListOrdered, LoaderCircle, LogOut, Menu, MoreHorizontal, PenLine, Plus, Redo2, Search, Settings, ShieldCheck, Sparkles, Strikethrough, Trash2, Underline, Video, WandSparkles, X, Zap, CalendarClock, Undo2, Type } from 'lucide-react';
 import './styles.css';
 
-// Browser Firebase configuration must be supplied at build time. No project credentials are hard-coded in source.
-// Set VITE_FIREBASE_CONFIG to the complete Firebase Web app config JSON from Firebase Console.
-// Optional VITE_FIREBASE_AUTH_DOMAIN overrides authDomain (for a first-party auth-domain proxy).
+// Prefer an explicit Web app config when supplied. Otherwise derive the usable public
+// project settings from the checked-in Firebase Android config so builds do not fail
+// merely because VITE_FIREBASE_CONFIG was omitted. Firebase web config is public; never
+// put service-account credentials here. For best practice, register a Firebase Web app.
 function readFirebaseConfig(){
-  try{
-    const raw=import.meta.env.VITE_FIREBASE_CONFIG;
-    if(!raw)return null;
-    const c=JSON.parse(raw);
-    const authDomain=String(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN||c?.authDomain||'').trim();
-    if(c?.apiKey&&authDomain&&c?.projectId&&c?.appId)return {...c,authDomain};
-    console.error('Firebase configuration is incomplete: VITE_FIREBASE_CONFIG needs apiKey, authDomain, projectId and appId.');
-  }catch(e){console.error('VITE_FIREBASE_CONFIG is missing or invalid JSON.');}
+  let c = null;
+  try {
+    const raw = String(import.meta.env.VITE_FIREBASE_CONFIG || '').trim();
+    if (raw) c = JSON.parse(raw);
+  } catch (e) { console.warn('Ignoring invalid VITE_FIREBASE_CONFIG; trying bundled Firebase project config.'); }
+  const client = androidFirebaseConfig?.client?.[0];
+  const projectId = String(c?.projectId || androidFirebaseConfig?.project_info?.project_id || '').trim();
+  const apiKey = String(c?.apiKey || client?.api_key?.[0]?.current_key || '').trim();
+  const appId = String(c?.appId || client?.client_info?.mobilesdk_app_id || '').trim();
+  const authDomain = String(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || c?.authDomain || (projectId ? `${projectId}.firebaseapp.com` : '')).trim();
+  if (apiKey && projectId && appId && authDomain) return { ...c, apiKey, projectId, appId, authDomain };
+  console.error('Firebase config unavailable: provide VITE_FIREBASE_CONFIG or a valid root google-services.json.');
   return null;
 }
 const firebaseConfig = readFirebaseConfig();
@@ -261,7 +267,7 @@ function App(){
         if(!nativeUser?.uid)throw new Error('Google did not return an authenticated account. Check that Google sign-in is enabled in Firebase and the Android SHA fingerprints are registered.');
         await acceptSignedInUser(nativeUser,true);return;
       }
-      if(!auth){setAuthError('Google sign-in is not configured for this browser build. Set VITE_FIREBASE_CONFIG with your Firebase Web app configuration, enable Google sign-in in Firebase Authentication, and rebuild.');return;}
+      if(!auth){setAuthError('Firebase sign-in could not initialize. Check that google-services.json belongs to this Firebase project, Google sign-in is enabled in Firebase Authentication, and this domain is authorized.');return;}
       if(isEmbeddedBrowser()){setAuthError('Google blocks sign-in inside this in-app browser. Open this page in Chrome or Safari and try again.');return;}
       if(!navigator.onLine){setAuthError('You appear to be offline. Check your connection and try again.');return;}
       const provider=new GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});
@@ -514,7 +520,7 @@ function GoogleG(){return <span className="google-g">G</span>}
 
 // Google Identity Services fallback: signs in without a redirect or Firebase's cross-site iframe, so it still works in browsers that block third-party storage.
 // The Web OAuth client below must list this site's origin under "Authorized JavaScript origins" (Google Cloud Console -> APIs & Services -> Credentials).
-const WEB_GOOGLE_CLIENT_ID = String(import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID || '').trim();
+const WEB_GOOGLE_CLIENT_ID = String(import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID || androidFirebaseConfig?.client?.[0]?.oauth_client?.find(c => c.client_type === 3)?.client_id || '').trim();
 function loadGoogleIdentity(){
   return new Promise((resolve,reject)=>{
     const ready=()=>window.google?.accounts?.oauth2?resolve(window.google.accounts.oauth2):reject(new Error('Google sign-in did not load.'));
@@ -526,7 +532,7 @@ function loadGoogleIdentity(){
   });
 }
 function googleAccessToken(){
-  if(!WEB_GOOGLE_CLIENT_ID)return Promise.reject(new Error('Browser Google sign-in is not configured. Set VITE_GOOGLE_WEB_CLIENT_ID to your Web OAuth client ID and rebuild the frontend.'));
+  if(!WEB_GOOGLE_CLIENT_ID)return Promise.reject(new Error('Browser Google sign-in has no Web OAuth client ID. Add a Web OAuth client to google-services.json or set VITE_GOOGLE_WEB_CLIENT_ID, then rebuild.'));
   return loadGoogleIdentity().then(oauth2=>new Promise((resolve,reject)=>{
     const client=oauth2.initTokenClient({client_id:WEB_GOOGLE_CLIENT_ID,scope:'openid email profile',prompt:'select_account',
       callback:r=>{if(r?.access_token)resolve(r.access_token);else reject(Object.assign(new Error(r?.error_description||r?.error||'Google sign-in failed.'),{code:`gis/${r?.error||'failed'}`}));},

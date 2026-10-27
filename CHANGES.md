@@ -143,3 +143,8 @@ Set `VITE_GOOGLE_WEB_CLIENT_ID` to the Web application OAuth client ID from Goog
 - Added a lightweight web service worker that caches the app shell and built assets for repeat/offline launches; API routes and non-GET requests are deliberately excluded from caching. Native Capacitor continues to use its local WebView bundle and local IndexedDB drafts.
 - Tightened client-side card checkout validation for card-number length, expiry format/month and expired cards, and CVV length. Existing server-side Flutterwave v4 verification and idempotent crediting are preserved; payment results still require server verification.
 - Build verification could not be completed in this environment because dependencies were not installed and npm install did not finish before timeout. Run `npm install` then `npm run build` before release.
+
+## Firebase configuration fallback (2026-10-27)
+- Firebase Web initialization now prefers `VITE_FIREBASE_CONFIG` when supplied, but can fall back to public project settings in the root `google-services.json`.
+- Browser Google sign-in can derive its Web OAuth client ID from the type-3 OAuth client in that same file; `VITE_GOOGLE_WEB_CLIENT_ID` remains an override.
+- This avoids a hard failure solely because the JSON environment variable was omitted. The Firebase project must still have Google sign-in enabled and the web hostname authorized. A dedicated Firebase Web app configuration is still recommended for production.
