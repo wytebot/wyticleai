@@ -16,6 +16,7 @@
 | `TOKEN_ENCRYPTION_KEY` | Run `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`. Never change it after users connect sites. |
 | `GEMINI_API_KEY` | aistudio.google.com/apikey (Google AI Studio). Used for writing, live research and featured images. |
 | `GEMINI_MODEL` / `GEMINI_FALLBACK_MODELS` | Optional. Defaults `gemini-3.5-flash-lite` and `gemini-3.8-flash,gemini-3.6-flash`. |
+| `GEMINI_IMAGE_BASIC_MODEL`, `IMAGE_BASIC_USD_COST` | Optional. Cheaper "Basic" featured-image model (default `gemini-2.5-flash-image`, $0.039) used unless the user picks High quality. |
 | `GEMINI_IMAGE_MODEL` / `GEMINI_IMAGE_FALLBACK_MODELS` | Optional. Defaults `gemini-3.1-flash-image-preview` and `gemini-2.5-flash-image`. |
 | `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` | Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID → **Web application**. Authorized redirect URI: `<API_PUBLIC_URL>/api/connect/blogger/callback`. Enable **Blogger API** and **Google Drive API**; add scopes `blogger` and `drive` on the consent screen. |
 | `APP_URL` | Public URL of the web frontend. |

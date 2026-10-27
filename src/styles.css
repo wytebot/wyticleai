@@ -130,3 +130,24 @@
 .offline-banner{position:sticky;top:0;z-index:25;display:flex;align-items:center;gap:9px;padding:10px 16px;background:#292113;border-bottom:1px solid #594323;color:#f2d7a0;font-size:12px;line-height:1.5}
 .offline-dot{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:#e5b85c}
 @media(max-width:760px){.offline-banner{padding:9px 12px;font-size:11px}}
+
+.article-featured,.document-featured{width:100%;max-height:340px;object-fit:cover;border-radius:18px;margin:0 0 18px;display:block}
+.image-mode{margin:-4px 0 14px;display:grid;gap:10px}
+.segment{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:4px;border:1px solid var(--line,#2a2a2a);border-radius:16px;background:rgba(255,255,255,.03)}
+.segment button{border:0;background:transparent;color:inherit;padding:10px 8px;border-radius:12px;font:inherit;font-weight:700;cursor:pointer;display:grid;gap:2px;text-align:center}
+.segment button small{font-weight:400;opacity:.65;font-size:.72em}
+.segment button.on{background:#f4f4f4;color:#080808}
+.upload-mini{padding:14px;gap:6px}
+.upload-mini img{width:100%;max-height:150px;object-fit:cover;border-radius:12px}
+
+.menu-wrap{position:relative;display:inline-flex}
+.menu-trigger{padding:8px 10px!important;min-width:0}
+.menu-pop{position:absolute;right:0;top:calc(100% + 8px);z-index:60;min-width:200px;max-width:80vw;padding:6px;border:1px solid var(--line,#292929);border-radius:16px;background:#141414;box-shadow:0 18px 50px #000a;display:grid;gap:2px}
+.menu-item{display:flex;align-items:center;gap:10px;width:100%;padding:11px 12px;border:0;border-radius:11px;background:transparent;color:inherit;font:inherit;font-size:calc(13px*var(--fs,1));text-align:left;cursor:pointer}
+.menu-item:hover,.menu-item:focus-visible{background:rgba(255,255,255,.08);outline:0}
+.menu-item:disabled{opacity:.4;cursor:default}
+.menu-item.danger{color:#ff8f8f}
+.quality-box{display:grid;gap:8px}
+.editor-sticky-toolbar .menu-pop{right:auto;left:0}
+.editor-sticky-toolbar{overflow:visible!important;flex-wrap:wrap!important}
+.editor-sticky-toolbar .menu-pop{max-height:60vh;overflow-y:auto}

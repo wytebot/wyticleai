@@ -66,7 +66,14 @@ async function deactivatePushDevice(uid,token){
   if(firestore){const ref=pushCollection().doc(pushDocId(token));const doc=await ref.get();if(doc.exists&&doc.get('userId')===String(uid))await ref.set({active:false,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});return;}
   if(supabaseError)throw supabaseError;throw new Error('No push-device registry is configured.');
 }
-const GEMINI_API_KEY=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||'').trim();
+const GEMINI_API_KEYS=[process.env.GEMINI_API_KEY,process.env.GEMINI_API_KEY_2,process.env.GEMINI_API_KEY_3,process.env.GOOGLE_API_KEY].map(v=>String(v||'').trim()).filter((v,i,a)=>v&&a.indexOf(v)===i);
+const GEMINI_API_KEY=GEMINI_API_KEYS[0]||'';
+// Optional cross-provider text fallbacks. Keys stay server-side and are never sent to the browser.
+const OPENAI_API_KEY=(process.env.OPENAI_API_KEY||'').trim();
+const OPENAI_MODEL=(process.env.OPENAI_MODEL||'gpt-4.1-mini').trim();
+const ANTHROPIC_API_KEY=(process.env.ANTHROPIC_API_KEY||'').trim();
+const ANTHROPIC_MODEL=(process.env.ANTHROPIC_MODEL||'claude-3-5-haiku-latest').trim();
+const hasTextProvider=()=>Boolean(GEMINI_API_KEYS.length||OPENAI_API_KEY||ANTHROPIC_API_KEY);
 const splitList=v=>String(v||'').split(',').map(x=>x.trim()).filter(Boolean);
 const GEMINI_MODEL=process.env.GEMINI_MODEL||'gemini-3.5-flash-lite';
 const GEMINI_FALLBACK_MODELS=splitList(process.env.GEMINI_FALLBACK_MODELS||'gemini-3.8-flash,gemini-3.6-flash');
@@ -128,7 +135,7 @@ async function ensureWallet(uid){
   if(!data){const r=await supabase.from('wryte_wallets').insert({user_id:uid,credits:0,free_generations_used:0,trial_project_ids:[]}).select('*').single(); if(r.error && r.error.code!=='23505')throw r.error; if(r.data)data=r.data; else {const again=await supabase.from('wryte_wallets').select('*').eq('user_id',uid).single(); if(again.error)throw again.error;data=again.data;}}
   return data;
 }
-app.get('/health',(_req,res)=>res.json({ok:true,service:'wyticle-ai-api',authConfigured:firebaseReady,databaseConfigured:Boolean(supabase),aiConfigured:Boolean(GEMINI_API_KEY),aiProvider:GEMINI_API_KEY?'gemini':'unconfigured'}));
+app.get('/health',(_req,res)=>res.json({ok:true,service:'wyticle-ai-api',authConfigured:firebaseReady,databaseConfigured:Boolean(supabase),aiConfigured:hasTextProvider(),aiProviders:{gemini:Boolean(GEMINI_API_KEYS.length),geminiKeyCount:GEMINI_API_KEYS.length,openai:Boolean(OPENAI_API_KEY),anthropic:Boolean(ANTHROPIC_API_KEY)},imageProvider:GEMINI_API_KEY?'gemini':'unconfigured'}));
 app.post('/api/push/register',auth,async(req,res)=>{
   const token=String(req.body?.token||'').trim();const platform=String(req.body?.platform||'unknown');
   if(token.length<40||token.length>4096||!/^[A-Za-z0-9_./:-]+$/.test(token))return res.status(400).json({error:'Invalid push registration token.'});
@@ -143,6 +150,7 @@ function isPrivateAddress(a){if(net.isIPv6(a)){const l=a.toLowerCase();return l=
 async function assertPublicHost(hostname){const h=hostname.replace(/^\[|\]$/g,'');if(net.isIP(h))throw new Error('Use your site domain name, not an IP address.');const addrs=await dns.lookup(h,{all:true});if(!addrs.length||addrs.some(x=>isPrivateAddress(x.address)))throw new Error('That site resolves to a private network address.');}
 async function listSites(uid){const {data,error}=await supabase.from('wryte_connections').select('id,provider,site_url,blog_id,blog_name,created_at').eq('user_id',uid);if(error)throw error;return data||[];}
 app.get('/api/sites',auth,dbRequired,async(req,res)=>{try{res.json({sites:await listSites(req.user.uid)});}catch(e){res.status(500).json({error:'Unable to load connected sites.'});}});
+app.delete('/api/sites/:id',auth,dbRequired,async(req,res)=>{try{const id=String(req.params.id||'').trim();if(!id)return res.status(400).json({error:'Connection ID is required.'});const {data,error}=await supabase.from('wryte_connections').delete().eq('id',id).eq('user_id',req.user.uid).eq('provider','blogger').select('id');if(error)throw error;if(!data?.length)return res.status(404).json({error:'Blogger connection not found.'});const remaining=await listSites(req.user.uid);if(!remaining.length){await supabase.from('wryte_drive_settings').update({access_token_enc:null,refresh_token_enc:null,token_expiry:null,updated_at:new Date().toISOString()}).eq('user_id',req.user.uid);}res.json({ok:true,sites:remaining});}catch(e){console.error('Disconnect Blogger:',e.message);res.status(500).json({error:'Unable to disconnect Blogger. Please try again.'});}});
 
 // Blogger OAuth: short-lived state is server stored and tied to a verified Firebase user.
 app.post('/api/connect/blogger/start',auth,dbRequired,async(req,res)=>{
@@ -410,7 +418,10 @@ const PRICING_CONFIG = Object.freeze({
 function pricing(){return {inPerM:PRICING_CONFIG.inputUsdPerMillion,outPerM:PRICING_CONFIG.outputUsdPerMillion,search:PRICING_CONFIG.searchUsdPerCall,image:PRICING_CONFIG.imageUsdCost,markup:PRICING_CONFIG.creditMarkup,creditUsd:PRICING_CONFIG.creditValueUsd};}
 const costUsd=({input=0,output=0,searches=0})=>{const p=pricing();return input/1e6*p.inPerM+output/1e6*p.outPerM+searches*p.search;};
 const creditsForUsd=(usd)=>{const p=pricing();return Math.max(1,Math.ceil(usd*p.markup/p.creditUsd));};
-const imageCredits=()=>Number(process.env.IMAGE_CREDIT_COST)||creditsForUsd(pricing().image);
+const imageCredits=(quality='basic')=>quality==='high'
+  ?(Number(process.env.IMAGE_CREDIT_COST)||creditsForUsd(pricing().image))
+  :(Number(process.env.IMAGE_BASIC_CREDIT_COST)||creditsForUsd(Number(process.env.IMAGE_BASIC_USD_COST)||0.039));
+const imageQualityOf=(q)=>q==='high'?'high':'basic';
 // Gemini counts "thinking" tokens against maxOutputTokens, so leave headroom or JSON can be cut off mid-way.
 const OUTPUT_HEADROOM=3000;
 const maxOutTokens=(action)=>action==='diagnose'?2500+OUTPUT_HEADROOM:Math.min(16000,envNum('MAX_OUTPUT_TOKENS',9000)+OUTPUT_HEADROOM);
@@ -447,15 +458,27 @@ function classifyGeminiError(status,message=''){
   return new AIError(AI_MSG.busy,{status:503,code:'ai_busy',retryable:true,log});
 }
 const textModels=()=>[...new Set([GEMINI_MODEL,...GEMINI_FALLBACK_MODELS])];
-const imageModels=()=>[...new Set([GEMINI_IMAGE_MODEL,...GEMINI_IMAGE_FALLBACK_MODELS])];
+const GEMINI_IMAGE_BASIC_MODEL=process.env.GEMINI_IMAGE_BASIC_MODEL||'gemini-2.5-flash-image';
+// "basic" (default) uses the cheapest image model first; "high" uses the premium model first. Each falls back to the other.
+const imageModels=(quality='basic')=>[...new Set(quality==='high'?[GEMINI_IMAGE_MODEL,...GEMINI_IMAGE_FALLBACK_MODELS,GEMINI_IMAGE_BASIC_MODEL]:[GEMINI_IMAGE_BASIC_MODEL,...GEMINI_IMAGE_FALLBACK_MODELS,GEMINI_IMAGE_MODEL])];
 async function geminiRequest(model,body,timeoutMs=120000){
-  let response,payload;
-  try{
-    response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':GEMINI_API_KEY},body:JSON.stringify(body),signal:AbortSignal.timeout(timeoutMs)});
-    payload=await response.json().catch(()=>({}));
-  }catch(e){throw new AIError(AI_MSG.timeout,{status:504,code:'ai_timeout',retryable:true,log:`Gemini network error: ${e.name}: ${e.message}`});}
-  if(!response.ok)throw classifyGeminiError(response.status,payload.error?.message||'');
-  return payload;
+  if(!GEMINI_API_KEYS.length)throw new AIError(AI_MSG.setup,{status:503,code:'ai_not_configured',log:'No Gemini API keys configured'});
+  let lastError;
+  // Try each configured key for the same model before runGemini advances to the next model.
+  // This also allows separate Google AI Studio projects/quotas to act as genuine fallbacks.
+  for(let keyIndex=0;keyIndex<GEMINI_API_KEYS.length;keyIndex++){
+    let response,payload;
+    try{
+      response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':GEMINI_API_KEYS[keyIndex]},body:JSON.stringify(body),signal:AbortSignal.timeout(timeoutMs)});
+      payload=await response.json().catch(()=>({}));
+    }catch(e){lastError=new AIError(AI_MSG.timeout,{status:504,code:'ai_timeout',retryable:true,log:`Gemini network error: ${e.name}: ${e.message}`});continue;}
+    if(response.ok)return payload;
+    lastError=classifyGeminiError(response.status,payload.error?.message||'');
+    // A bad prompt/schema is not fixed by another key; quota, auth, model and server errors may be.
+    if([400,422].includes(lastError.status)&&!['ai_model','ai_auth','ai_busy'].includes(lastError.code))throw lastError;
+    console.warn(`[gemini] key slot ${keyIndex+1}/${GEMINI_API_KEYS.length} failed for ${model}: ${lastError.log||lastError.code}`);
+  }
+  throw lastError||new AIError(AI_MSG.busy,{status:503,code:'ai_busy'});
 }
 // Tries each model in order; transient failures are retried with backoff + jitter, then the next model is used.
 async function runGemini({models,buildBody,validate,timeoutMs=120000,attempts=3}){
@@ -503,11 +526,29 @@ function readCandidate(payload,{allowTruncated=false}={}){
 function usageOf(payload,model,extra={}){const u=payload.usageMetadata||{};return {inputTokens:(u.promptTokenCount||0)+(u.toolUsePromptTokenCount||0),outputTokens:(u.candidatesTokenCount||0)+(u.thoughtsTokenCount||0),searchCalls:0,model,provider:'gemini',...extra};}
 const invalidOutput=(why)=>new AIError(AI_MSG.badOutput,{status:502,code:'ai_invalid',retryable:true,log:`Rejected output: ${why}`});
 const thinkingConfig=()=>process.env.GEMINI_THINKING_LEVEL?{thinkingConfig:{thinkingLevel:process.env.GEMINI_THINKING_LEVEL}}:{};
+async function parseStructuredText(text,check){const parsed=extractJson(text);if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw invalidOutput('not valid JSON');if(check)check(parsed);return parsed;}
+async function openAIText({system,userTask,action,temperature,check}){
+  const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{Authorization:`Bearer ${OPENAI_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({model:OPENAI_MODEL,messages:[{role:'system',content:system+'\nReturn only valid JSON. Do not use markdown fences.'},{role:'user',content:userTask}],response_format:{type:'json_object'},temperature,max_tokens:maxOutTokens(action)}),signal:AbortSignal.timeout(120000)});
+  const data=await r.json().catch(()=>({}));if(!r.ok)throw new AIError(AI_MSG.busy,{status:503,code:'ai_fallback_failed',retryable:true,log:`OpenAI HTTP ${r.status}: ${data.error?.message||''}`});
+  const parsed=await parseStructuredText(data.choices?.[0]?.message?.content,check);return {parsed,usage:{inputTokens:data.usage?.prompt_tokens||0,outputTokens:data.usage?.completion_tokens||0,searchCalls:0,model:OPENAI_MODEL,provider:'openai'}};
+}
+async function anthropicText({system,userTask,action,temperature,check}){
+  const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'x-api-key':ANTHROPIC_API_KEY,'anthropic-version':'2023-06-01','content-type':'application/json'},body:JSON.stringify({model:ANTHROPIC_MODEL,system:system+'\nReturn only valid JSON. Do not use markdown fences.',messages:[{role:'user',content:userTask}],temperature,max_tokens:maxOutTokens(action)}),signal:AbortSignal.timeout(120000)});
+  const data=await r.json().catch(()=>({}));if(!r.ok)throw new AIError(AI_MSG.busy,{status:503,code:'ai_fallback_failed',retryable:true,log:`Anthropic HTTP ${r.status}: ${data.error?.message||''}`});
+  const parsed=await parseStructuredText((data.content||[]).filter(x=>x.type==='text').map(x=>x.text).join('\n'),check);return {parsed,usage:{inputTokens:data.usage?.input_tokens||0,outputTokens:data.usage?.output_tokens||0,searchCalls:0,model:ANTHROPIC_MODEL,provider:'anthropic'}};
+}
 async function generateStructured({system,userTask,schema,action,temperature=0.7,check}){
-  return runGemini({models:textModels(),attempts:3,
-    buildBody:(_model,useSchema,feedback)=>({systemInstruction:{parts:[{text:system}]},contents:[{role:'user',parts:[{text:userTask+(feedback?`\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED (${feedback}). Return a corrected, complete answer that fixes this.`:'')}]}],generationConfig:{responseMimeType:'application/json',...(useSchema?{responseSchema:toGeminiSchema(schema)}:{}),maxOutputTokens:maxOutTokens(action),temperature,...thinkingConfig()}}),
-    validate:async(payload,model)=>{const {text}=readCandidate(payload);const parsed=extractJson(text);if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw invalidOutput('not valid JSON');if(check)check(parsed);return {parsed,usage:usageOf(payload,model)};}
-  });
+  let primaryError=null;
+  if(GEMINI_API_KEYS.length){
+    try{return await runGemini({models:textModels(),attempts:2,
+      buildBody:(_model,useSchema,feedback)=>({systemInstruction:{parts:[{text:system}]},contents:[{role:'user',parts:[{text:userTask+(feedback?`\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED (${feedback}). Return a corrected, complete answer that fixes this.`:'')}]}],generationConfig:{responseMimeType:'application/json',...(useSchema?{responseSchema:toGeminiSchema(schema)}:{}),maxOutputTokens:maxOutTokens(action),temperature,...thinkingConfig()}}),
+      validate:async(payload,model)=>{const {text}=readCandidate(payload);const parsed=await parseStructuredText(text,check);return {parsed,usage:usageOf(payload,model)};}
+    });}catch(e){primaryError=e;if(e.code==='ai_blocked')throw e;console.warn('[ai-fallback] Gemini exhausted configured models:',e.log||e.message);}
+  }
+  if(OPENAI_API_KEY){try{return await openAIText({system,userTask,action,temperature,check});}catch(e){console.warn('[ai-fallback] OpenAI failed:',e.log||e.message);primaryError=e;}}
+  if(ANTHROPIC_API_KEY){try{return await anthropicText({system,userTask,action,temperature,check});}catch(e){console.warn('[ai-fallback] Anthropic failed:',e.log||e.message);primaryError=e;}}
+  if(!hasTextProvider())throw new AIError('AI service is not configured. Add GEMINI_API_KEY (and optionally GEMINI_API_KEY_2 / GEMINI_API_KEY_3), OPENAI_API_KEY, or ANTHROPIC_API_KEY to the server environment.',{status:503,code:'ai_not_configured'});
+  throw primaryError||new AIError(AI_MSG.busy,{status:503,code:'ai_busy'});
 }
 async function resolveRedirect(uri){
   if(!/^https:\/\/vertexaisearch\.cloud\.google\.com\/grounding-api-redirect\//i.test(uri))return uri;
@@ -557,9 +598,9 @@ async function factCheckContent({title,docType,country,text}){
   }catch(e){console.warn('[fact-check] skipped:',e.log||e.message);return null;}
 }
 // Image generation uses Gemini's native image models. Aspect ratio is optional: if a model rejects it, retry without.
-async function generateImageWithGemini(prompt){
+async function generateImageWithGemini(prompt,quality='basic'){
   let last;
-  for(const model of imageModels()){
+  for(const model of imageModels(quality)){
     for(const withRatio of [true,false]){
       try{
         const payload=await geminiRequest(model,{contents:[{role:'user',parts:[{text:prompt}]}],generationConfig:{responseModalities:['IMAGE'],...(withRatio?{imageConfig:{aspectRatio:'16:9'}}:{})}},120000);
@@ -581,7 +622,7 @@ async function generateImageWithGemini(prompt){
 }
 
 // The hold is the worst case the request can cost (token caps + search cap), so a generation can never cost more than was reserved.
-function estimateCredits({action,brief={}}){if(action==='image')return imageCredits();// Reserve against a conservative input allowance plus the hard output/search caps. Settlement refunds unused units.
+function estimateCredits({action,brief={}}){if(action==='image')return imageCredits(imageQualityOf(brief.imageQuality));// Reserve against a conservative input allowance plus the hard output/search caps. Settlement refunds unused units.
 const inputGuess=PRICING_CONFIG.maxInputTokensEstimate;return creditsForUsd(costUsd({input:inputGuess,output:maxOutTokens(action),searches:searchLimit(action,brief?.documentType)}));}
 async function debitBefore(uid,{action,projectId,brief}){const units=estimateCredits({action,brief});const {data,error}=await supabase.rpc('wryte_reserve_usage',{p_user_id:uid,p_action:action,p_project_id:projectId||null,p_estimated_credits:units});if(error)throw new Error('Credit service unavailable. Try again later.');if(!data?.ok) {const e=new Error(data?.error||'Not enough credits. Purchase a credit pack to continue.');e.status=402;throw e;}return {reservationId:data.reservation_id,units:data.reserved_credits||0,free:data.free||false};}
 async function settleUsage(reservationId,uid,usage,action,projectId){const actual=creditsForUsd(costUsd({input:Number(usage?.inputTokens||0),output:Number(usage?.outputTokens||0),searches:Number(usage?.searchCalls||0)}));const {data,error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservationId,p_user_id:uid,p_actual_credits:actual,p_usage:usage||{},p_action:action,p_project_id:projectId||null});if(error||data?.ok===false)throw new Error('Could not settle usage. Contact support before retrying.');return data;}
@@ -592,10 +633,23 @@ const htmlToText=(h)=>String(h||'').replace(/<(script|style)[\s\S]*?<\/\1>/gi,' 
 const countWords=(t)=>(String(t).match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu)||[]).length;
 const slugifySrv=(s='')=>String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,80);
 function lengthRange(label=''){const m=String(label).match(/(\d[\d,]*)\s*[–-]\s*(\d[\d,]*)\s*words/i);return m?{min:Number(m[1].replace(/,/g,'')),max:Number(m[2].replace(/,/g,''))}:null;}
+// The title lives in its own field. Remove any leading <h1> and any "Featured image: ..." description the model adds,
+// so the title is never shown twice and image descriptions never leak into the article body.
+function stripArticleExtras(h=''){
+  let out=String(h).trim();
+  for(let i=0;i<3;i++){
+    const before=out;
+    out=out.replace(/^\s*<h1[^>]*>[\s\S]*?<\/h1>\s*/i,'');
+    out=out.replace(/^\s*<(p|div|figure|blockquote)[^>]*>\s*(?:<(?:strong|em|b|i)>\s*)*(?:featured|hero|cover|header)\s+(?:image|photo|illustration)\b[\s\S]*?<\/\1>\s*/i,'');
+    if(out===before)break;
+  }
+  out=out.replace(/<(p|div|figure|blockquote)[^>]*>\s*(?:<(?:strong|em|b|i)>\s*)*(?:featured|hero|cover)\s+(?:image|photo|illustration)\s*(?:<\/(?:strong|em|b|i)>\s*)*[:\-–—][\s\S]*?<\/\1>\s*/gi,'');
+  return out.trim();
+}
 function normalizeHtml(raw,{title='',article=false}={}){
   let h=String(raw||'').trim().replace(/^```(?:html)?\s*/i,'').replace(/\s*```$/,'').trim().replace(/\*\*([^*\n<>]+?)\*\*/g,'<strong>$1</strong>');
   if(h&&!/<\/?(p|h[1-6]|ul|ol|li|table|blockquote|div|section|article)\b/i.test(h))h=h.split(/\n{2,}/).map(p=>`<p>${escHtmlSrv(p.trim()).replace(/\n/g,'<br>')}</p>`).join('\n');
-  if(article&&title&&!/<h1[\s>]/i.test(h))h=`<h1>${escHtmlSrv(title)}</h1>\n${h}`;
+  if(article)h=stripArticleExtras(h);
   return h;
 }
 const DOC_RULES={letter:'Use a standard letter layout where applicable: date, sender/return address if provided, recipient name and address if provided, salutation, clear paragraphs, courteous closing, and sender name. Do not invent addresses or facts.',email:'Use a concise subject/title, appropriate greeting, readable body, clear call to action when useful, sign-off and sender details if supplied. Avoid fake email addresses.',resume:'Create a professional ATS-friendly CV/resume with contact details only if supplied, professional summary, skills, experience, education and certifications as applicable. Never invent employers, qualifications, dates, metrics or contact information; use clear [placeholders] for missing essential details.',coverLetter:'Create a tailored cover letter with date and recipient details if supplied, role/company, relevant evidence from the user-provided experience, a professional opening, specific fit, and closing. Never invent experience.',proposal:'Use an executive summary, problem/opportunity, objectives, scope, approach, timeline, deliverables, budget only if provided, risks and next steps as applicable.',report:'Use a clear title, executive summary, background, methodology only if supplied, findings, analysis, recommendations and conclusion. Separate facts from assumptions.',businessPlan:'Use executive summary, business description, customer problem, offering, market and competitor analysis with uncertainty stated, marketing and operations, team, risks, and financial assumptions only where supplied. Do not fabricate verified market statistics.',meetingMinutes:'Use meeting title, date, attendees, agenda, discussion summary, decisions, action items with owners and deadlines only if supplied, and next meeting if known.',socialPost:'Create platform-appropriate content with a strong opening, concise body, suitable call to action and optional relevant hashtags. Avoid unsupported claims and platform policy violations.',productDescription:'Write a clear product title, customer benefits, features, use cases, specifications only if supplied, limitations and a truthful call to action. Never invent product certifications or performance claims.',pressRelease:'Use a standard press release structure: FOR IMMEDIATE RELEASE only if appropriate, headline, subheadline if useful, dateline only if supplied, lead paragraph, supporting facts, approved quote only if supplied (otherwise no fake quote), company boilerplate only from supplied facts, and media contact only if supplied.'};
@@ -642,12 +696,12 @@ const SCHEMA_HINT={diagnosis:'{"diagnosis":{"score":<integer 0-100>,"findings":[
 function buildArticleGuidance(brief,range,hasResearch,researchEnabled){
   const target=range?`Target ${range.min}-${range.max} words of article body (never below ${range.min}).`:`Length: ${brief.length||'appropriate for the topic'}.`;
   const sections=range?Math.max(4,Math.round(range.min/220)):6;
-  return `Detect the primary keyword and related keywords from the topic. ${target} Structure: one H1 (a specific, benefit-led headline that contains the primary keyword naturally), an introduction that answers the reader's search intent in its first 100 words, about ${sections} H2 sections (use H3 where it helps scanning) each making a distinct point with an example, step or comparison, a short FAQ section when it fits the search intent, and a conclusion with one clear next step. Choose depth and examples that fit the audience and country in the brief; keep paragraphs to 2-4 sentences; use a table or checklist where it helps comparison or action; avoid keyword stuffing and repeated phrasing. Do not include SEO metadata inside the html. SEO title at most 60 characters; meta description 140-160 characters; slug lowercase with hyphens. ${hasResearch?'Use the RESEARCH NOTES for every specific figure, date, price or rule, and state the year for time-sensitive facts. If notes disagree, say so or leave the figure out.':(researchEnabled?'Live research was unavailable for this request: avoid precise statistics, prices, dates, laws and named studies unless they are universally established; write general, verifiable guidance instead.':'')}`;
+  return `Detect the primary keyword and related keywords from the topic. ${target} Structure: do NOT put the title or any H1 inside the html (the title is returned separately in the title field; make it a specific, benefit-led headline that contains the primary keyword naturally). Never write image descriptions or a 'Featured image:' line in the html. Start directly with an introduction that answers the reader's search intent in its first 100 words, about ${sections} H2 sections (use H3 where it helps scanning) each making a distinct point with an example, step or comparison, a short FAQ section when it fits the search intent, and a conclusion with one clear next step. Choose depth and examples that fit the audience and country in the brief; keep paragraphs to 2-4 sentences; use a table or checklist where it helps comparison or action; avoid keyword stuffing and repeated phrasing. Do not include SEO metadata inside the html. SEO title at most 60 characters; meta description 140-160 characters; slug lowercase with hyphens. ${hasResearch?'Use the RESEARCH NOTES for every specific figure, date, price or rule, and state the year for time-sensitive facts. If notes disagree, say so or leave the figure out.':(researchEnabled?'Live research was unavailable for this request: avoid precise statistics, prices, dates, laws and named studies unless they are universally established; write general, verifiable guidance instead.':'')}`;
 }
 app.post('/api/generate',auth,dbRequired,async(req,res)=>{
   let reservation=null;const {action='initial',project,brief={},instruction='',projectId,documentType='article'}=req.body||{};
   try{
-    if(!GEMINI_API_KEY)return res.status(503).json({error:'AI service is not configured. Set GEMINI_API_KEY (Google AI Studio) on the server.',code:'ai_not_configured'});
+    if(!hasTextProvider())return res.status(503).json({error:'AI service is not configured. Set GEMINI_API_KEY (and optionally GEMINI_API_KEY_2 / GEMINI_API_KEY_3), OPENAI_API_KEY, or ANTHROPIC_API_KEY on the server.',code:'ai_not_configured'});
     if(!['initial','document','revision','fix','diagnose'].includes(action))return res.status(400).json({error:'Unsupported AI action.'});
     if(action==='document'&&!Object.keys(DOC_RULES).includes(documentType))return res.status(400).json({error:'Choose a supported document type.'});
     const briefSize=Buffer.byteLength(JSON.stringify(brief||{}),'utf8');
@@ -712,7 +766,7 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
     const generated=await generateStructured({system:SYSTEM_PROMPT,userTask,schema,action,temperature,check});
     const parsed=generated.parsed;
     // Bill the successful generation plus the research request; failed upstream attempts are absorbed, never charged to the user.
-    const usage={inputTokens:generated.usage.inputTokens+(research?.usage.inputTokens||0),outputTokens:generated.usage.outputTokens+(research?.usage.outputTokens||0),searchCalls:research?1:0,model:generated.usage.model,researchModel:research?.usage.model||null,provider:'gemini'};
+    const usage={inputTokens:generated.usage.inputTokens+(research?.usage.inputTokens||0),outputTokens:generated.usage.outputTokens+(research?.usage.outputTokens||0),searchCalls:research?1:0,model:generated.usage.model,researchModel:research?.usage.model||null,provider:generated.usage.provider||'gemini'};
     let result;
     if(isDiagnosis){
       result={diagnosis:{score:Math.max(0,Math.min(100,Math.round(Number(parsed.diagnosis.score)))),findings:parsed.diagnosis.findings.map(x=>String(x).trim()).filter(Boolean).slice(0,10),factChecked:Boolean(research),factChecks:research?parseFactChecks(research.notes):[],sources:(research?.sources||[]).slice(0,6)}};
@@ -746,14 +800,14 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
 app.post('/api/image',auth,dbRequired,async(req,res)=>{
   let reservation=null;
   try{
-    if(!GEMINI_API_KEY)return res.status(503).json({error:'Image generation is not configured. Set GEMINI_API_KEY on the server.',code:'ai_not_configured'});
-    const {projectId,title,niche,style,details=''}=req.body||{};if(!projectId||!title)return res.status(400).json({error:'Article project and title are required.'});
+    if(!GEMINI_API_KEYS.length)return res.status(503).json({error:'Image generation is not configured. Set GEMINI_API_KEY on the server.',code:'ai_not_configured'});
+    const {projectId,title,niche,style,details=''}=req.body||{};const quality=imageQualityOf(req.body?.quality);if(!projectId||!title)return res.status(400).json({error:'Article project and title are required.'});
     await ensureWallet(req.user.uid);
     // Image generation is a separately priced premium operation to protect margins; users can still upload their own image for free.
-    reservation=isBillingExempt(req.user)?null:await debitBefore(req.user.uid,{action:'image',projectId,brief:{length:'image'}});
-    const prompt=`Create a polished, original editorial featured image for a blog article, 16:9 landscape. Topic: ${String(title).slice(0,500)}. Niche: ${String(niche||'general').slice(0,120)}. Visual style requested: ${String(style||'professional, clear, modern').slice(0,300)}. Additional context: ${String(details).slice(0,500)}. Composition should be high quality, readable at blog thumbnail size, with a clear focal subject. Absolutely no text, letters, numbers, logos, watermarks or brand marks anywhere in the image. Do not create misleading depictions for medical, financial, political, or news claims.`;
-    const img=await generateImageWithGemini(prompt);
-    if(reservation?.reservationId){const {error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid,p_actual_credits:imageCredits(),p_usage:{imageModel:img.model,provider:'gemini'},p_action:'image',p_project_id:projectId});if(error)throw new Error('Could not settle image usage.');}
+    reservation=isBillingExempt(req.user)?null:await debitBefore(req.user.uid,{action:'image',projectId,brief:{length:'image',imageQuality:quality}});
+    const prompt=quality==='basic'?`Simple clean editorial illustration for a blog article, 16:9 landscape. Topic: ${String(title).slice(0,300)}. Style: ${String(style||'professional, modern').slice(0,150)}. One clear focal subject, flat modern look, no text, letters, numbers, logos or watermarks.`:`Create a polished, original editorial featured image for a blog article, 16:9 landscape. Topic: ${String(title).slice(0,500)}. Niche: ${String(niche||'general').slice(0,120)}. Visual style requested: ${String(style||'professional, clear, modern').slice(0,300)}. Additional context: ${String(details).slice(0,500)}. Composition should be high quality, readable at blog thumbnail size, with a clear focal subject. Absolutely no text, letters, numbers, logos, watermarks or brand marks anywhere in the image. Do not create misleading depictions for medical, financial, political, or news claims.`;
+    const img=await generateImageWithGemini(prompt,quality);
+    if(reservation?.reservationId){const {error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid,p_actual_credits:imageCredits(quality),p_usage:{imageModel:img.model,imageQuality:quality,provider:'gemini'},p_action:'image',p_project_id:projectId});if(error)throw new Error('Could not settle image usage.');}
     const mime=/^image\/(png|jpeg|webp|gif)$/i.test(img.mime)?img.mime.toLowerCase():'image/png';
     const updated=await ensureWallet(req.user.uid);res.json({dataUrl:`data:${mime};base64,${img.b64}`,credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0)),unlimited:isBillingExempt(req.user)});
   }catch(e){
@@ -917,8 +971,8 @@ app.use((err,_req,res,_next)=>{
   console.error('Unhandled error:',err?.message||err);res.status(err?.status||500).json({error:'Unexpected server error.'});
 });
 process.on('unhandledRejection',e=>console.error('Unhandled rejection:',e?.message||e));
-{const need=['FIREBASE_SERVICE_ACCOUNT_JSON|GOOGLE_APPLICATION_CREDENTIALS','SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY','TOKEN_ENCRYPTION_KEY','GEMINI_API_KEY','GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET','APP_URL','API_PUBLIC_URL','ALLOWED_ORIGIN'];
-const missing=need.filter(n=>!n.split('|').some(k=>process.env[k]));if(missing.length)console.warn('[config] Missing environment variables:',missing.join(', '));
+{const need=['FIREBASE_SERVICE_ACCOUNT_JSON|GOOGLE_APPLICATION_CREDENTIALS','SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY','TOKEN_ENCRYPTION_KEY','GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET','APP_URL','API_PUBLIC_URL','ALLOWED_ORIGIN'];
+const missing=need.filter(n=>!n.split('|').some(k=>process.env[k]));if(missing.length)console.warn('[config] Missing environment variables:',missing.join(', '));if(!hasTextProvider())console.warn('[config] Configure at least one text AI key: GEMINI_API_KEY (optionally GEMINI_API_KEY_2 and GEMINI_API_KEY_3), OPENAI_API_KEY, or ANTHROPIC_API_KEY. Gemini is still required for image generation and live Google Search grounding.')
 if(process.env.TOKEN_ENCRYPTION_KEY&&Buffer.from(process.env.TOKEN_ENCRYPTION_KEY,'base64').length!==32)console.warn('[config] TOKEN_ENCRYPTION_KEY must decode to exactly 32 bytes.');
 if(process.env.NODE_ENV==='production'&&!allowedOrigins.length)console.warn('[config] ALLOWED_ORIGIN is empty: browser requests will be rejected in production.');}
 app.listen(port,()=>console.log(`Wyticle AI API listening on ${port}`));
