@@ -18,7 +18,13 @@ dotenv.config(); // optional fallback to ./.env or real environment variables; n
 const app = express();
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1)); // required behind Render/Railway/Vercel/Nginx or every user shares one rate-limit bucket
 const port = Number(process.env.PORT || 8787);
-const allowedOrigins = (process.env.ALLOWED_ORIGIN || '').split(',').map(x=>x.trim()).filter(Boolean);
+const allowedOrigins = (() => {
+  const base = (process.env.ALLOWED_ORIGIN || '').split(',').map(x=>x.trim().replace(/\/$/,'')).filter(Boolean);
+  const out = new Set(base);
+  // A site is normally reachable at both apex and www; treat them as the same app so one never blocks the other.
+  for (const o of base) { try { const u = new URL(o); out.add(`${u.protocol}//${u.hostname.startsWith('www.') ? u.hostname.slice(4) : 'www.' + u.hostname}${u.port ? ':' + u.port : ''}`); } catch {} }
+  return [...out];
+})();
 app.disable('x-powered-by');
 app.use(helmet({crossOriginResourcePolicy:{policy:'cross-origin'}}));
 const capacitorOrigins = new Set(['capacitor://localhost','ionic://localhost','http://localhost','https://localhost']);

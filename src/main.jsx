@@ -57,7 +57,14 @@ if(firebaseConfig){
 }
 // Frontend and /api share one domain. For the installed APK, provide the production URL
 // at build time with VITE_API_BASE_URL because its local Capacitor origin is not the API host.
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || (Capacitor.isNativePlatform() ? '' : window.location.origin)).replace(/\/$/, '');
+// Installed APK: the local WebView origin has no server, so it MUST use VITE_API_BASE_URL.
+// Browser/PWA: the frontend and /api are served from one domain, so always call the page's own origin.
+// (Using VITE_API_BASE_URL here broke browsers opened on a different host than the configured one, e.g.
+// apex vs www or a *.vercel.app URL, because the request became cross-origin and CORS blocked it.)
+// Only local development (vite on localhost) may point at a separate backend through VITE_API_BASE_URL.
+const IS_NATIVE_APP = Capacitor.isNativePlatform();
+const IS_LOCAL_DEV_HOST = !IS_NATIVE_APP && ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname);
+const API_BASE = String(IS_NATIVE_APP ? (import.meta.env.VITE_API_BASE_URL || '') : IS_LOCAL_DEV_HOST ? (import.meta.env.VITE_API_BASE_URL || window.location.origin) : window.location.origin).replace(/\/$/, '');
 // Optional shared WyBuild billing gateway. Leave unset to use Wyticle's current billing backend.
 const WYBUILD_BILLING_BASE = String(import.meta.env.VITE_WYBUILD_BILLING_BASE_URL || '').trim().replace(/\/$/, '');
 const WYBUILD_APP_ID = 'wyticle';
@@ -261,7 +268,7 @@ function App(){
           console.warn('API request failed:',path,fe?.message,'serverUp=',serverUp);
           message=navigator.onLine===false?'You appear to be offline. Turn on mobile data or Wi-Fi and try again.'
             :serverUp?`The Wyticle server (${host}) is reachable but refused this request. Make sure the server is deployed with the latest code and ALLOWED_ORIGIN includes this app.`
-            :`Cannot reach the Wyticle server at ${host}. Your data is fine: the server is down or asleep, or this APK was built with the wrong VITE_API_BASE_URL (it must be your https backend). Open ${requestBase}/api/health in your browser to check.`;
+            :`Cannot reach the Wyticle server at ${host}. Your data is fine: the server is down or asleep, ${IS_NATIVE_APP?'or this APK was built with the wrong VITE_API_BASE_URL (it must be your https backend)':'or the server is blocking this site (check ALLOWED_ORIGIN)'}. Open ${requestBase}/api/health in your browser to check.`;
         }
         const err=new Error(message); err.status=0; throw err; }
       finally{ clearTimeout(timer); }
