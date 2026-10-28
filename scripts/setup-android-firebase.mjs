@@ -14,10 +14,11 @@ const rootGradle = path.join(android, 'build.gradle');
 if (!fs.existsSync(source)) throw new Error('Missing google-services.json at project root or android-setup/google-services.json.');
 const firebaseConfig = JSON.parse(fs.readFileSync(source, 'utf8'));
 const capacitorConfig = JSON.parse(fs.readFileSync(capacitorConfigPath, 'utf8'));
-const firebasePackage = firebaseConfig.client?.[0]?.client_info?.android_client_info?.package_name;
-if (firebasePackage && firebasePackage !== capacitorConfig.appId) throw new Error(`Firebase package ${firebasePackage} does not match capacitor.config.json appId ${capacitorConfig.appId}. Register the matching Android app in Firebase and download its google-services.json.`);
+const packages = (firebaseConfig.client || []).map((c) => c.client_info?.android_client_info?.package_name).filter(Boolean);
+if (packages.length && !packages.includes(capacitorConfig.appId)) throw new Error(`google-services.json contains ${packages.join(', ')} but capacitor.config.json appId is ${capacitorConfig.appId}. Register the matching Android app in Firebase and download its google-services.json.`);
 if (!fs.existsSync(appDir)) throw new Error('Android platform is missing. Run `npx cap add android` first.');
-if (!(firebaseConfig.client?.[0]?.oauth_client || []).length) console.warn('Warning: this google-services.json has no OAuth client entries. Google sign-in may fail until you add SHA fingerprints, enable the Google provider, and download a fresh config from Firebase.');
+const matched = (firebaseConfig.client || []).find((c) => c.client_info?.android_client_info?.package_name === capacitorConfig.appId);
+if (!(matched?.oauth_client || []).some((o) => o.client_type === 1)) console.warn('Warning: this google-services.json has no Android (type 1) OAuth client for ' + capacitorConfig.appId + ' (no SHA fingerprint registered). Google sign-in may fail until you add SHA fingerprints, enable the Google provider, and download a fresh config from Firebase.');
 fs.copyFileSync(source, path.join(appDir, 'google-services.json'));
 function addPlugin(file, pluginId, version, isApp = false) {
   if (!fs.existsSync(file)) throw new Error(`Missing Gradle file: ${path.relative(root, file)}`);

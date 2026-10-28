@@ -12,31 +12,42 @@ import { jsPDF } from 'jspdf';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { initializeApp } from 'firebase/app';
+// Optional at build time: import.meta.glob returns {} if the file is absent, so the build never fails on it.
+const googleServicesFiles = import.meta.glob('../google-services.json', { eager: true, import: 'default' });
+const googleServices = Object.values(googleServicesFiles)[0] || null;
 import { getAuth, GoogleAuthProvider, signInWithRedirect, signInWithPopup, signInWithCredential, getRedirectResult, onAuthStateChanged } from 'firebase/auth';
 import { Activity, Download, RefreshCw, ArrowLeft, ArrowRight, ArrowDown, ArrowUp, BookOpen, Bold, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3, CloudUpload, FileText, Globe, Heading, ImagePlus, Italic, Link as LinkIcon, List, ListOrdered, LoaderCircle, LogOut, Menu, MoreHorizontal, PenLine, Plus, Redo2, Search, Settings, ShieldCheck, Sparkles, Strikethrough, Trash2, Underline, Video, WandSparkles, X, Zap, CalendarClock, Undo2, Type } from 'lucide-react';
 import './styles.css';
 
-// Public Firebase *web* settings (these identify the project; they are not secrets and no
-// google-services.json is read or bundled). Override any of them with VITE_FIREBASE_CONFIG
-// (JSON) or VITE_FIREBASE_AUTH_DOMAIN. Never put service-account credentials here.
+// Firebase settings are public identifiers, not secrets. Order of precedence: VITE_* env overrides,
+// then the Android client in google-services.json that matches this app's package ID, then built-in
+// defaults for package ng.name.wyticle. Never put service-account credentials here.
+const APP_PACKAGE_ID = String(import.meta.env.VITE_APP_PACKAGE_ID || 'ng.name.wyticle').trim();
 const DEFAULT_FIREBASE_WEB = {
   projectId: 'wryteai-62356',
   apiKey: 'AIzaSyCvaBZBk49cGmTXAGs93XJ4ARfIAH08ICk',
-  appId: '1:589252246114:android:94dc642dee94a4cb0def3b'
+  appId: '1:589252246114:android:e42728fc521e94020def3b'
 };
 const DEFAULT_WEB_GOOGLE_CLIENT_ID = '589252246114-pdlhe9mbu5u80p554039bdp4pp1e3ada.apps.googleusercontent.com';
+function pickAndroidClient(cfg){
+  const clients = Array.isArray(cfg?.client) ? cfg.client : [];
+  const exact = clients.find(x => x?.client_info?.android_client_info?.package_name === APP_PACKAGE_ID);
+  if (!exact && clients.length) console.warn(`google-services.json has no client for ${APP_PACKAGE_ID}; register that Android app in Firebase. Using built-in defaults for app-specific values.`);
+  return exact || null;
+}
+const androidClient = pickAndroidClient(googleServices);
 function readFirebaseConfig(){
   let c = null;
   try {
     const raw = String(import.meta.env.VITE_FIREBASE_CONFIG || '').trim();
     if (raw) c = JSON.parse(raw);
-  } catch (e) { console.warn('Ignoring invalid VITE_FIREBASE_CONFIG; using built-in public Firebase web settings.'); }
-  const projectId = String(c?.projectId || DEFAULT_FIREBASE_WEB.projectId).trim();
-  const apiKey = String(c?.apiKey || DEFAULT_FIREBASE_WEB.apiKey).trim();
-  const appId = String(c?.appId || DEFAULT_FIREBASE_WEB.appId).trim();
+  } catch (e) { console.warn('Ignoring invalid VITE_FIREBASE_CONFIG; using google-services.json / built-in settings.'); }
+  const projectId = String(c?.projectId || googleServices?.project_info?.project_id || DEFAULT_FIREBASE_WEB.projectId).trim();
+  const apiKey = String(c?.apiKey || androidClient?.api_key?.[0]?.current_key || DEFAULT_FIREBASE_WEB.apiKey).trim();
+  const appId = String(c?.appId || androidClient?.client_info?.mobilesdk_app_id || DEFAULT_FIREBASE_WEB.appId).trim();
   const authDomain = String(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || c?.authDomain || (projectId ? `${projectId}.firebaseapp.com` : '')).trim();
   if (apiKey && projectId && appId && authDomain) return { ...c, apiKey, projectId, appId, authDomain };
-  console.error('Firebase config unavailable: provide VITE_FIREBASE_CONFIG.');
+  console.error('Firebase config unavailable: provide VITE_FIREBASE_CONFIG or a google-services.json for ' + APP_PACKAGE_ID + '.');
   return null;
 }
 const firebaseConfig = readFirebaseConfig();
@@ -566,7 +577,7 @@ function GoogleG(){return <span className="google-g">G</span>}
 
 // Google Identity Services fallback: signs in without a redirect or Firebase's cross-site iframe, so it still works in browsers that block third-party storage.
 // The Web OAuth client below must list this site's origin under "Authorized JavaScript origins" (Google Cloud Console -> APIs & Services -> Credentials).
-const WEB_GOOGLE_CLIENT_ID = String(import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID || DEFAULT_WEB_GOOGLE_CLIENT_ID || '').trim();
+const WEB_GOOGLE_CLIENT_ID = String(import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID || androidClient?.oauth_client?.find(o => o.client_type === 3)?.client_id || DEFAULT_WEB_GOOGLE_CLIENT_ID || '').trim();
 function loadGoogleIdentity(){
   return new Promise((resolve,reject)=>{
     const ready=()=>window.google?.accounts?.oauth2?resolve(window.google.accounts.oauth2):reject(new Error('Google sign-in did not load.'));
