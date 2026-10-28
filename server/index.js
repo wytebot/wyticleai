@@ -30,6 +30,9 @@ app.use(cors({origin:(origin,cb)=>{
   return cb(new Error('Origin not allowed'));
 },credentials:false}));
 app.use(express.json({limit:'20mb',verify:(req,_res,buf)=>{if(req.originalUrl.startsWith('/api/billing/webhook'))req.rawBody=buf;}}));
+// API responses are per-user and live: never let a browser, WebView or proxy reuse them.
+app.set('etag',false);
+app.use('/api',(_req,res,next)=>{res.set({'Cache-Control':'no-store, max-age=0','Pragma':'no-cache'});next();});
 app.use('/api/',rateLimit({windowMs:60_000,limit:40,standardHeaders:true,legacyHeaders:false}));
 app.use('/api/image',rateLimit({windowMs:60*60_000,limit:8,standardHeaders:true,legacyHeaders:false}));
 
@@ -77,14 +80,20 @@ const hasTextProvider=()=>Boolean(GEMINI_API_KEYS.length||OPENAI_API_KEY||ANTHRO
 const splitList=v=>String(v||'').split(',').map(x=>x.trim()).filter(Boolean);
 const GEMINI_MODEL=process.env.GEMINI_MODEL||'gemini-3.5-flash-lite';
 const GEMINI_FALLBACK_MODELS=splitList(process.env.GEMINI_FALLBACK_MODELS||'gemini-3.8-flash,gemini-3.6-flash');
-const GEMINI_IMAGE_MODEL=process.env.GEMINI_IMAGE_MODEL||'gemini-3.1-flash-image-preview';
-const GEMINI_IMAGE_FALLBACK_MODELS=splitList(process.env.GEMINI_IMAGE_FALLBACK_MODELS||'gemini-2.5-flash-image');
+// Google retired the *-preview and Imagen image models (and gemini-2.5-flash-image on 2 Oct 2026). Old names left in env vars are mapped to the current GA models so a stale setting cannot break image generation.
+const RETIRED_IMAGE_MODELS={'gemini-3.1-flash-image-preview':'gemini-3.1-flash-image','gemini-3-pro-image-preview':'gemini-3-pro-image','gemini-2.5-flash-image-preview':'gemini-3.1-flash-image','gemini-2.0-flash-preview-image-generation':'gemini-3.1-flash-image','gemini-2.0-flash-exp-image-generation':'gemini-3.1-flash-image','imagen-4.0-generate-001':'gemini-3.1-flash-image','imagen-4.0-fast-generate-001':'gemini-3.1-flash-image','imagen-4.0-ultra-generate-001':'gemini-3-pro-image'};
+const currentImageModel=(m)=>RETIRED_IMAGE_MODELS[String(m||'').trim()]||String(m||'').trim();
+const GEMINI_IMAGE_MODEL=currentImageModel(process.env.GEMINI_IMAGE_MODEL||'gemini-3.1-flash-image');
+const GEMINI_IMAGE_FALLBACK_MODELS=splitList(process.env.GEMINI_IMAGE_FALLBACK_MODELS||'gemini-3-pro-image,gemini-2.5-flash-image').map(currentImageModel);
 const APP_URL=(process.env.APP_URL||'http://localhost:5173').replace(/\/$/,'');
 const API_PUBLIC_URL=(process.env.API_PUBLIC_URL||'http://localhost:8787').replace(/\/$/,'');
 // Owner accounts that skip all credit billing (AI text, revisions, diagnosis and images). Matching is server-side only and requires a Google-verified email.
 // Add more with BILLING_BYPASS_EMAILS=a@x.com,b@y.com
 const BILLING_BYPASS_EMAILS=new Set(['ilemobayotolulope11092003@gmail.com',...String(process.env.BILLING_BYPASS_EMAILS||'').split(',')].map(e=>e.trim().toLowerCase()).filter(Boolean));
 const isBillingExempt=(user)=>Boolean(user?.emailVerified&&user.email&&BILLING_BYPASS_EMAILS.has(String(user.email).trim().toLowerCase()));
+// Free trial is OFF by default: only accounts in BILLING_BYPASS_EMAILS (the owner) use the app without credits. Set FREE_TRIAL_ENABLED=true to bring back the 2 free articles + follow-ups for everyone.
+const FREE_TRIAL_ENABLED=String(process.env.FREE_TRIAL_ENABLED||'').toLowerCase()==='true';
+const freeLeft=(w)=>FREE_TRIAL_ENABLED?Math.max(0,2-(w?.free_generations_used||0)):0;
 // Hosting dashboards often keep quotes or stray spaces pasted with a value, and Google then answers "Error 401: invalid_client". Clean both Google OAuth values once at startup.
 for(const k of ['GOOGLE_OAUTH_CLIENT_ID','GOOGLE_OAUTH_CLIENT_SECRET']){if(process.env[k])process.env[k]=process.env[k].trim().replace(/^["'`]+|["'`]+$/g,'').trim();}
 const googleClientIdProblem=()=>/^\d+-[a-z0-9_]+\.apps\.googleusercontent\.com$/i.test(process.env.GOOGLE_OAUTH_CLIENT_ID||'')?'':'GOOGLE_OAUTH_CLIENT_ID is not a valid Google OAuth client ID. It should look like 123456789-abc123.apps.googleusercontent.com (copy it from Google Cloud Console, APIs & Services, Credentials, your Web client).';
@@ -145,7 +154,7 @@ app.post('/api/push/register',auth,async(req,res)=>{
 });
 app.delete('/api/push/register',auth,async(req,res)=>{const token=String(req.body?.token||'').trim();if(!token)return res.status(400).json({error:'Push token is required.'});try{await deactivatePushDevice(req.user.uid,token);res.json({ok:true});}catch(e){res.status(503).json({error:'Unable to unregister this device.'});}});
 
-app.get('/api/me',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({user:req.user,wallet:{credits:w.credits,freeGenerationsRemaining:Math.max(0,2-(w.free_generations_used||0)),unlimited:isBillingExempt(req.user)},connectedSites:await listSites(req.user.uid)});}catch(e){console.error(e);res.status(500).json({error:'Unable to load your account.'});}});
+app.get('/api/me',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({user:req.user,wallet:{credits:w.credits,freeGenerationsRemaining:freeLeft(w),unlimited:isBillingExempt(req.user)},connectedSites:await listSites(req.user.uid)});}catch(e){console.error(e);res.status(500).json({error:'Unable to load your account.'});}});
 function isPrivateAddress(a){if(net.isIPv6(a)){const l=a.toLowerCase();return l==='::1'||l==='::'||l.startsWith('fc')||l.startsWith('fd')||l.startsWith('fe8')||l.startsWith('fe9')||l.startsWith('fea')||l.startsWith('feb')||l.startsWith('::ffff:');}const [x,y]=a.split('.').map(Number);return x===0||x===10||x===127||(x===100&&y>=64&&y<=127)||(x===169&&y===254)||(x===172&&y>=16&&y<=31)||(x===192&&y===168)||x>=224;}
 async function assertPublicHost(hostname){const h=hostname.replace(/^\[|\]$/g,'');if(net.isIP(h))throw new Error('Use your site domain name, not an IP address.');const addrs=await dns.lookup(h,{all:true});if(!addrs.length||addrs.some(x=>isPrivateAddress(x.address)))throw new Error('That site resolves to a private network address.');}
 async function listSites(uid){const {data,error}=await supabase.from('wryte_connections').select('id,provider,site_url,blog_id,blog_name,created_at').eq('user_id',uid);if(error)throw error;return data||[];}
@@ -420,7 +429,7 @@ const costUsd=({input=0,output=0,searches=0})=>{const p=pricing();return input/1
 const creditsForUsd=(usd)=>{const p=pricing();return Math.max(1,Math.ceil(usd*p.markup/p.creditUsd));};
 const imageCredits=(quality='basic')=>quality==='high'
   ?(Number(process.env.IMAGE_CREDIT_COST)||creditsForUsd(pricing().image))
-  :(Number(process.env.IMAGE_BASIC_CREDIT_COST)||creditsForUsd(Number(process.env.IMAGE_BASIC_USD_COST)||0.039));
+  :(Number(process.env.IMAGE_BASIC_CREDIT_COST)||creditsForUsd(Number(process.env.IMAGE_BASIC_USD_COST)||0.067));
 const imageQualityOf=(q)=>q==='high'?'high':'basic';
 // Gemini counts "thinking" tokens against maxOutputTokens, so leave headroom or JSON can be cut off mid-way.
 const OUTPUT_HEADROOM=3000;
@@ -458,7 +467,7 @@ function classifyGeminiError(status,message=''){
   return new AIError(AI_MSG.busy,{status:503,code:'ai_busy',retryable:true,log});
 }
 const textModels=()=>[...new Set([GEMINI_MODEL,...GEMINI_FALLBACK_MODELS])];
-const GEMINI_IMAGE_BASIC_MODEL=process.env.GEMINI_IMAGE_BASIC_MODEL||'gemini-2.5-flash-image';
+const GEMINI_IMAGE_BASIC_MODEL=currentImageModel(process.env.GEMINI_IMAGE_BASIC_MODEL||'gemini-3.1-flash-image');
 // "basic" (default) uses the cheapest image model first; "high" uses the premium model first. Each falls back to the other.
 const imageModels=(quality='basic')=>[...new Set(quality==='high'?[GEMINI_IMAGE_MODEL,...GEMINI_IMAGE_FALLBACK_MODELS,GEMINI_IMAGE_BASIC_MODEL]:[GEMINI_IMAGE_BASIC_MODEL,...GEMINI_IMAGE_FALLBACK_MODELS,GEMINI_IMAGE_MODEL])];
 async function geminiRequest(model,body,timeoutMs=120000){
@@ -624,9 +633,9 @@ async function generateImageWithGemini(prompt,quality='basic'){
 // The hold is the worst case the request can cost (token caps + search cap), so a generation can never cost more than was reserved.
 function estimateCredits({action,brief={}}){if(action==='image')return imageCredits(imageQualityOf(brief.imageQuality));// Reserve against a conservative input allowance plus the hard output/search caps. Settlement refunds unused units.
 const inputGuess=PRICING_CONFIG.maxInputTokensEstimate;return creditsForUsd(costUsd({input:inputGuess,output:maxOutTokens(action),searches:searchLimit(action,brief?.documentType)}));}
-async function debitBefore(uid,{action,projectId,brief}){const units=estimateCredits({action,brief});const {data,error}=await supabase.rpc('wryte_reserve_usage',{p_user_id:uid,p_action:action,p_project_id:projectId||null,p_estimated_credits:units});if(error)throw new Error('Credit service unavailable. Try again later.');if(!data?.ok) {const e=new Error(data?.error||'Not enough credits. Purchase a credit pack to continue.');e.status=402;throw e;}return {reservationId:data.reservation_id,units:data.reserved_credits||0,free:data.free||false};}
+async function debitBefore(uid,{action,projectId,brief}){const units=estimateCredits({action,brief});if(!FREE_TRIAL_ENABLED){await supabase.from('wryte_wallets').update({free_generations_used:2}).eq('user_id',uid).lt('free_generations_used',2);}const {data,error}=await supabase.rpc('wryte_reserve_usage',{p_user_id:uid,p_action:action,p_project_id:projectId||null,p_estimated_credits:units});if(error)throw new Error('Credit service unavailable. Try again later.');if(!data?.ok) {const e=new Error(data?.error||'Not enough credits. Purchase a credit pack to continue.');e.status=402;throw e;}return {reservationId:data.reservation_id,units:data.reserved_credits||0,free:data.free||false};}
 async function settleUsage(reservationId,uid,usage,action,projectId){const actual=creditsForUsd(costUsd({input:Number(usage?.inputTokens||0),output:Number(usage?.outputTokens||0),searches:Number(usage?.searchCalls||0)}));const {data,error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservationId,p_user_id:uid,p_actual_credits:actual,p_usage:usage||{},p_action:action,p_project_id:projectId||null});if(error||data?.ok===false)throw new Error('Could not settle usage. Contact support before retrying.');return data;}
-app.get('/api/credits',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({credits:w.credits||0,freeGenerationsRemaining:Math.max(0,2-(w.free_generations_used||0)),unit:'credits',unlimited:isBillingExempt(req.user)});}catch(e){res.status(500).json({error:'Unable to load credit balance.'});}});
+app.get('/api/credits',auth,dbRequired,async(req,res)=>{try{const w=await ensureWallet(req.user.uid);res.json({credits:w.credits||0,freeGenerationsRemaining:freeLeft(w),unit:'credits',unlimited:isBillingExempt(req.user)});}catch(e){res.status(500).json({error:'Unable to load credit balance.'});}});
 // ---- Output post-processing: derive plain text / word count server-side so the model only writes each thing once ----
 const escHtmlSrv=(s='')=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const htmlToText=(h)=>String(h||'').replace(/<(script|style)[\s\S]*?<\/\1>/gi,' ').replace(/<br\s*\/?>|<\/(p|div|h[1-6]|li|tr|blockquote)>/gi,'\n').replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').replace(/[ \t]+/g,' ').replace(/ ?\n ?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
@@ -718,7 +727,7 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
     const trialIds=wallet.trial_project_ids||[];const trialProject=trialIds.includes(targetProject);
     const exempt=isBillingExempt(req.user);
     if(exempt){reservation=null;}
-    else if(action!=='initial'&&action!=='document'&&trialProject){
+    else if(FREE_TRIAL_ENABLED&&action!=='initial'&&action!=='document'&&trialProject){
       const {data:trial,error:trialError}=await supabase.rpc('wryte_reserve_trial_followup',{p_user_id:req.user.uid,p_project_id:targetProject,p_action:action,p_limit:PRICING_CONFIG.trialFollowupLimit});
       if(trialError)throw new Error('Credit service unavailable. Try again later.');
       if(trial?.ok)reservation={free:true,reservationId:trial.reservation_id,units:0};
@@ -785,7 +794,7 @@ app.post('/api/generate',auth,dbRequired,async(req,res)=>{
     if(reservation?.reservationId)await settleUsage(reservation.reservationId,req.user.uid,usage,action,targetProject);
     else if(reservation?.free&&action==='initial'){const {error}=await supabase.rpc('wryte_register_trial_project',{p_user_id:req.user.uid,p_project_id:targetProject});if(error)throw new Error('Could not save free article entitlement. Please contact support.');}
     const updated=await ensureWallet(req.user.uid);
-    result.billing={credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0)),chargedCredits:(reservation?.free||exempt)?0:undefined,unlimited:exempt,projectId:targetProject};
+    result.billing={credits:updated.credits||0,freeGenerationsRemaining:freeLeft(updated),chargedCredits:(reservation?.free||exempt)?0:undefined,unlimited:exempt,projectId:targetProject};
     result.documentType=docType;
     sendPushToUser(req.user.uid,{title:isDiagnosis?'Your content check is ready':'Your content is ready',body:isDiagnosis?'Wyticle AI finished checking your content.':'Wyticle AI finished generating your content.',type:'generation_complete',projectId:targetProject});
     res.json(result);
@@ -809,7 +818,7 @@ app.post('/api/image',auth,dbRequired,async(req,res)=>{
     const img=await generateImageWithGemini(prompt,quality);
     if(reservation?.reservationId){const {error}=await supabase.rpc('wryte_settle_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid,p_actual_credits:imageCredits(quality),p_usage:{imageModel:img.model,imageQuality:quality,provider:'gemini'},p_action:'image',p_project_id:projectId});if(error)throw new Error('Could not settle image usage.');}
     const mime=/^image\/(png|jpeg|webp|gif)$/i.test(img.mime)?img.mime.toLowerCase():'image/png';
-    const updated=await ensureWallet(req.user.uid);res.json({dataUrl:`data:${mime};base64,${img.b64}`,credits:updated.credits||0,freeGenerationsRemaining:Math.max(0,2-(updated.free_generations_used||0)),unlimited:isBillingExempt(req.user)});
+    const updated=await ensureWallet(req.user.uid);res.json({dataUrl:`data:${mime};base64,${img.b64}`,credits:updated.credits||0,freeGenerationsRemaining:freeLeft(updated),unlimited:isBillingExempt(req.user)});
   }catch(e){
     if(reservation?.reservationId){try{await supabase.rpc('wryte_release_usage',{p_reservation_id:reservation.reservationId,p_user_id:req.user.uid});}catch{}}
     console.error('Image generation:',e.log||e.message);

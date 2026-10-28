@@ -148,3 +148,22 @@ Set `VITE_GOOGLE_WEB_CLIENT_ID` to the Web application OAuth client ID from Goog
 - Firebase Web initialization now prefers `VITE_FIREBASE_CONFIG` when supplied, but can fall back to public project settings in the root `google-services.json`.
 - Browser Google sign-in can derive its Web OAuth client ID from the type-3 OAuth client in that same file; `VITE_GOOGLE_WEB_CLIENT_ID` remains an override.
 - This avoids a hard failure solely because the JSON environment variable was omitted. The Firebase project must still have Google sign-in enabled and the web hostname authorized. A dedicated Firebase Web app configuration is still recommended for production.
+
+## Image models, remove-image button, APK downloads
+- Image generation: Google shut down gemini-3.1-flash-image-preview, gemini-3-pro-image-preview, Imagen 4 and (2 Oct 2026) gemini-2.5-flash-image. Defaults are now gemini-3.1-flash-image (primary/basic), then gemini-3-pro-image, then gemini-2.5-flash-image. Retired names left in GEMINI_IMAGE_MODEL / GEMINI_IMAGE_FALLBACK_MODELS / GEMINI_IMAGE_BASIC_MODEL are auto-mapped to the current models.
+- Basic image cost default raised to 0.067 USD (IMAGE_BASIC_USD_COST) because basic now uses the same model as before-premium; override with the env var if you prefer.
+- Featured image can be removed (X on the preview image, Remove in the editor and in the image dialog, Remove image in the create form) so it can be replaced.
+- APK downloads: files are now saved to Downloads/Wyticle AI (fallback Documents/Wyticle AI), each write verified, and the share sheet is opened from a cache copy so Save to Files/Drive always works. The toast states where the file went. Drive downloads use the same path.
+
+## Free usage limited to the owner
+- Free trial (2 free articles + 4 free follow-ups per account) is now disabled unless FREE_TRIAL_ENABLED=true. Everyone except the owner email must have credits. Enforced server-side without needing a SQL migration; frontend "free" wording removed.
+
+## Account switching no longer shows the previous account's data
+- Local settings (credits, unlimited flag, Drive folder, Blogger selection) are now stored per account (settings key main:<uid>) instead of one shared record.
+- Signing out, or signing in as a different account, clears projects, the open article, drafts, connected sites, Drive files and the saved workspace so nothing from the previous account is shown.
+- The saved workspace no longer restores another account's open article or Drive settings after a reload.
+
+## Caching made lighter
+- Service worker (sw.js v2): pages and all non-hashed files are now network-first (always fresh, cache only used offline); only hashed /assets/* files are cache-first. Old caches are deleted on activate, a new version reloads the page automatically, and the app checks for updates on load, when you return to the tab, and when you come back online.
+- API responses send Cache-Control: no-store and ETags are off, so credits, projects lists and account data are never reused from a cache.
+- vercel.json: sw.js, index.html and the manifest are always revalidated; hashed assets are cached for a year (safe, the file name changes on every build).

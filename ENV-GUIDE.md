@@ -66,3 +66,6 @@ To let WyBuild own the registered Flutterwave webhook and forward verified Wytic
 - `WYBUILD_WEBHOOK_SHARED_SECRET`: a long random secret, identical to `WYTICLE_WEBHOOK_SHARED_SECRET` in WyBuild.
 
 In WyBuild's Vercel environment set `WYTICLE_PAYMENT_CONFIRM_URL` to this backend's `/api/wybuild-payment-confirmation` endpoint and set `WYTICLE_WEBHOOK_SHARED_SECRET` to the same value. Never expose this secret in `VITE_` variables or commit it to source control. When using the shared webhook, do not also register Wyticle's direct `/api/billing/webhook` endpoint with Flutterwave.
+
+## Image model variables (updated Oct 2026)
+Best option: delete GEMINI_IMAGE_MODEL, GEMINI_IMAGE_FALLBACK_MODELS and GEMINI_IMAGE_BASIC_MODEL from your host so the new defaults apply. Image generation needs a Google AI Studio key on a billing-enabled project; free-tier keys have no image quota.
