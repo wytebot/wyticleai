@@ -144,7 +144,7 @@ async function ensureWallet(uid){
   if(!data){const r=await supabase.from('wryte_wallets').insert({user_id:uid,credits:0,free_generations_used:0,trial_project_ids:[]}).select('*').single(); if(r.error && r.error.code!=='23505')throw r.error; if(r.data)data=r.data; else {const again=await supabase.from('wryte_wallets').select('*').eq('user_id',uid).single(); if(again.error)throw again.error;data=again.data;}}
   return data;
 }
-app.get('/health',(_req,res)=>res.json({ok:true,service:'wyticle-ai-api',authConfigured:firebaseReady,databaseConfigured:Boolean(supabase),aiConfigured:hasTextProvider(),aiProviders:{gemini:Boolean(GEMINI_API_KEYS.length),geminiKeyCount:GEMINI_API_KEYS.length,openai:Boolean(OPENAI_API_KEY),anthropic:Boolean(ANTHROPIC_API_KEY)},imageProvider:GEMINI_API_KEY?'gemini':'unconfigured'}));
+app.get(['/health','/api/health'],(_req,res)=>res.json({ok:true,service:'wyticle-ai-api',authConfigured:firebaseReady,databaseConfigured:Boolean(supabase),aiConfigured:hasTextProvider(),aiProviders:{gemini:Boolean(GEMINI_API_KEYS.length),geminiKeyCount:GEMINI_API_KEYS.length,openai:Boolean(OPENAI_API_KEY),anthropic:Boolean(ANTHROPIC_API_KEY)},imageProvider:GEMINI_API_KEY?'gemini':'unconfigured'}));
 app.post('/api/push/register',auth,async(req,res)=>{
   const token=String(req.body?.token||'').trim();const platform=String(req.body?.platform||'unknown');
   if(token.length<40||token.length>4096||!/^[A-Za-z0-9_./:-]+$/.test(token))return res.status(400).json({error:'Invalid push registration token.'});

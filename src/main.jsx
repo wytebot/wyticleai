@@ -238,7 +238,18 @@ function App(){
       let authHeaders;try{authHeaders=await tokenHeaders(u,attempt>0);}catch(te){const err=new Error(te?.message||'Your Google session needs refreshing. Please sign in again.');err.status=401;err.code='session_expired';throw err;}
       const ctrl=new AbortController();const timer=setTimeout(()=>ctrl.abort(),timeoutMs);let r;
       try{ r=await fetch(`${requestBase}${path}`,{...fetchOptions,signal:ctrl.signal,headers:{...authHeaders,...appHeaders,...(fetchOptions.headers||{})}}); }
-      catch(fe){ const err=new Error(fe?.name==='AbortError'?'This is taking longer than expected. Please check your connection and try again.':'Could not reach Wyticle. Check your internet connection and try again.'); err.status=0; throw err; }
+      catch(fe){
+        let message='This is taking longer than expected. Please check your connection and try again.';
+        if(fe?.name!=='AbortError'){
+          // Work out WHY it failed instead of always blaming the user's internet.
+          let host=requestBase;try{host=new URL(requestBase).host;}catch{}
+          let serverUp=false;try{const h=await fetch(`${requestBase}/api/health`,{cache:'no-store',signal:AbortSignal.timeout(8000)});serverUp=h.ok&&/json/i.test(h.headers.get('content-type')||'');}catch{}
+          console.warn('API request failed:',path,fe?.message,'serverUp=',serverUp);
+          message=navigator.onLine===false?'You appear to be offline. Turn on mobile data or Wi-Fi and try again.'
+            :serverUp?`The Wyticle server (${host}) is reachable but refused this request. Make sure the server is deployed with the latest code and ALLOWED_ORIGIN includes this app.`
+            :`Cannot reach the Wyticle server at ${host}. Your data is fine: the server is down or asleep, or this APK was built with the wrong VITE_API_BASE_URL (it must be your https backend). Open ${requestBase}/api/health in your browser to check.`;
+        }
+        const err=new Error(message); err.status=0; throw err; }
       finally{ clearTimeout(timer); }
       const data=await r.json().catch(()=>({}));
       if(r.status===401&&attempt===0)continue; // the ID token may simply have expired: force-refresh it and retry once

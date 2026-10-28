@@ -167,3 +167,7 @@ Set `VITE_GOOGLE_WEB_CLIENT_ID` to the Web application OAuth client ID from Goog
 - Service worker (sw.js v2): pages and all non-hashed files are now network-first (always fresh, cache only used offline); only hashed /assets/* files are cache-first. Old caches are deleted on activate, a new version reloads the page automatically, and the app checks for updates on load, when you return to the tab, and when you come back online.
 - API responses send Cache-Control: no-store and ETags are off, so credits, projects lists and account data are never reused from a cache.
 - vercel.json: sw.js, index.html and the manifest are always revalidated; hashed assets are cached for a year (safe, the file name changes on every build).
+
+## Clearer "could not reach server" errors
+- When an API request fails, the app now checks the server's /health and reports the real cause (offline, server unreachable / wrong VITE_API_BASE_URL, or server reachable but refusing the request) instead of always saying "check your internet".
+- Added GET /api/health (same as /health) so the check works when the site and API share one domain (on Vercel only /api/* reaches the server). The connection check now only counts a JSON reply as "server up".
